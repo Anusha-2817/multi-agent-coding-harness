@@ -23,11 +23,8 @@ from harness.state import (
     make_task_id,
 )
 
-# pytest collects any module-level class matching `Test*` as a test class, which
-# catches these two Pydantic models by name. The flag tells pytest to skip them.
-# Set here rather than in state.py so the models stay free of test-framework noise.
-TestResult.__test__ = False
-TesterFailure.__test__ = False
+# `TestResult` and `TesterFailure` match pytest's `Test*` collection glob; the
+# opt-out that keeps them from being collected lives in the root conftest.py.
 
 # The Group A fields, which the harness supplies at init.
 INIT_FIELDS = {

@@ -49,6 +49,8 @@ Build order. Phases 1–2 make **zero API calls**.
 | 4 | Failure evidence packaging, retry with evidence, escalation output | |
 | 5 | Fixture repos 2–3, Reviewer-rejection scenario, saved transcripts, README update | |
 
+**Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
+
 The Tester lands in Phase 1, before any agent scaffolding, because it is the only agent that needs no LLM and because a working Tester is what makes Phase 2's scripted failures verifiable.
 
 ---
@@ -139,7 +141,7 @@ The Reviewer reads the **rendered diff**, not `edits`. Minimality is a property 
 Plan: {summary: str, steps: list[str], target_files: list[str], constraints: list[str]}
 ```
 
-`target_files` is **load-bearing, not documentation.** An edit to a path outside `target_files` is a mechanical scope violation the harness detects on its own — before the Reviewer runs, alongside the render and livelock steps. The Reviewer still judges faithfulness and minimality; it simply is no longer the only line of defence on scope.
+`target_files` is **load-bearing, not documentation.** An edit to a path outside `target_files` is a mechanical scope violation the harness detects on its own — before the Reviewer runs, alongside the render and livelock steps. The Reviewer still judges faithfulness and minimality; it simply is no longer the only line of defence on scope. On a violation the harness writes a `ReviewerRejection` and routes back to the Implementer — see "The scope check reuses ReviewerRejection".
 
 `constraints` is what the Reviewer's `violated_constraints` refers back to. Without it the Reviewer would be reporting violations of a rubric nobody wrote down.
 
@@ -191,6 +193,14 @@ TesterFailure:     {kind: Literal["tester_failure"], failed_tests: list[str], tr
 
 `ReviewerRejection` deliberately has no `suggested_fix`. The Reviewer says what is wrong; the Implementer decides what to do about it. Otherwise the Reviewer ends up grading its own homework on the next attempt.
 
+### The scope check reuses ReviewerRejection
+
+When the mechanical scope check fires, the harness constructs a **`ReviewerRejection`** with the offending paths in `violated_constraints`. There is no third evidence type.
+
+`ReviewerRejection` means *"rejected on scope/intent grounds,"* not *"the Reviewer said so."* The Implementer's retry handling should not have to distinguish a cheap mechanical catch from an expensive judged one — the corrective action is identical, and a third type would fork the retry path for no gain.
+
+The **event log** does distinguish them: `scope_check_failed` and `review_rejected` are separate event names. Provenance is a question for the log and for debugging, not for the Implementer's prompt.
+
 `TesterFailure` deliberately has no parsed `expected_vs_actual`. The traceback already contains it, and parsing pytest output is brittle. `stdout_tail` is capped at 2000 characters.
 
 ---
@@ -232,6 +242,12 @@ One file per run: `logs/<task_id>.jsonl`, append-only. Each line:
 ```
 
 Everything is inlined — full plans, full diffs, full tracebacks. No references to external blobs. A run's log is self-contained and replayable on its own.
+
+`EventLog` exposes exactly one method: `append`. No update, no delete. Each call opens the file, writes one line, and closes it, so a crash mid-run leaves every prior event on disk and two `EventLog` instances for the same `task_id` append rather than truncate.
+
+The payload is serialized **before** the file is opened. If it fails to serialize, the event is still written, with the payload replaced by a `_serialization_error` marker and a truncated `repr`. A logging bug degrades one line; it never drops an event and never kills a run.
+
+Event names distinguish things the evidence types deliberately do not — `scope_check_failed` vs `review_rejected` being the case in point.
 
 ---
 
@@ -302,12 +318,13 @@ README.md
 Update this section at the end of every session. It is the first thing to read next session.
 
 **Phase:** 1 — in progress
-**Last completed:** 1.1 — `harness/state.py`. All seven models plus the `Status` StrEnum and `make_task_id()`. `tests/test_state.py`: 23 tests, all passing. Also added a root `conftest.py` (empty; its presence puts the repo root on `sys.path` so `tests/` can `import harness`).
+**Last completed:** 1.2 — `harness/events.py`. `EventLog` with a single `append` method, `logs/` created on init, one JSON object per line. `tests/test_events.py`: 27 tests. Suite is 50 tests, all passing.
 
-Decisions made this session and folded in above: the `Plan` shape with `target_files` as a mechanical scope check; `task_id` generated by the harness, not read from `task.json`; the `TestResult` shape.
+Previously: 1.1 — `harness/state.py`, all seven models plus the `Status` StrEnum and `make_task_id()`, with `tests/test_state.py` (23 tests). Root `conftest.py` puts the repo root on `sys.path` so `tests/` can `import harness`, and sets `__test__ = False` on `TestResult` and `TesterFailure` — both match pytest's `Test*` collection glob, and the opt-out belongs there rather than in `state.py` or repeated in each test file.
 
-Model conventions worth not re-litigating: `None` means "not yet produced" and is what the agent contract assertion checks — so `edits` is `Optional`, never defaulting to `[]`, or "never ran" and "ran and produced nothing" become indistinguishable. Harness-owned fields with a meaningful empty value (`attempt_count`, `previous_diffs`, `status`) get real defaults instead. `extra="forbid"` everywhere. Paths are `str`, never `Path`, so state round-trips through the JSONL log with no custom serializer. `max_attempts` is a module constant in `loop.py`, not a `TaskState` field.
+Decisions folded in so far: the `Plan` shape with `target_files` as a mechanical scope check; `task_id` generated by the harness, not read from `task.json`; the `TestResult` shape; the scope check reusing `ReviewerRejection` rather than adding a third evidence type.
 
-**Next task:** 1.2 — `harness/events.py`: `EventLog`, append-only JSONL writer. Then fixture repo 1, then the Tester. Zero API calls.
-**Open questions:**
-- What happens on a scope-check violation? It is detected before Review, but the disposition is undecided — halting, or routing back to the Implementer, which would need evidence, and "Failure evidence types" allows only two. Decide before the control loop in Phase 2.
+Conventions worth not re-litigating: `None` means "not yet produced" and is what the agent contract assertion checks — so `edits` is `Optional`, never defaulting to `[]`, or "never ran" and "ran and produced nothing" become indistinguishable. Harness-owned fields with a meaningful empty value (`attempt_count`, `previous_diffs`, `status`) get real defaults instead. `extra="forbid"` everywhere. Paths are `str` in models, never `Path`, so state round-trips through the JSONL log with no custom serializer. `max_attempts` is a module constant in `loop.py`, not a `TaskState` field. The event log degrades a bad payload rather than raising — logging must not be able to kill a run.
+
+**Next task:** 1.3 — `tasks/fixture_repo_1/`: a plain directory, no git, with a hand-authored `task.json` carrying `task_description` and `failure_input`, plus one deliberately failing test. Then 1.4, the Tester. Zero API calls.
+**Open questions:** none
