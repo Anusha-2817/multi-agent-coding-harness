@@ -255,6 +255,7 @@ logs/               gitignored — <task_id>.jsonl, one per run
 tests/              tests for the harness itself
 cli.py
 CLAUDE.md
+README.md
 ```
 
 ---
@@ -274,9 +275,6 @@ CLAUDE.md
 Update this section at the end of every session. It is the first thing to read next session.
 
 **Phase:** 0 — complete
-**Last completed:** repo scaffold (`harness/`, `harness/agents/`, `tasks/`, `tests/`, `cli.py`, `requirements.txt`, `.gitignore`), committed as `cfc3dbe`. All design decisions above resolved and folded in.
-**Next task:** Phase 1 — `harness/state.py` (TaskState + all models), then `harness/events.py`, fixture repo 1, Tester, unit tests. Zero API calls.
-**Open questions:**
-
-- CLAUDE.md and README.md currently live one directory above the repo root (`D:\Agentic_Project1\`), outside `mach/` and untracked. They should move into the repo so project memory is versioned with the code it describes. Not yet done.
-- `requirements.txt` is UTF-16 encoded and `pip install -r` cannot parse it. Needs re-saving as UTF-8.
+**Last completed:** Repo scaffold (`harness/`, `harness/agents/`, `tasks/`, `tests/`, `cli.py`, `requirements.txt`, `.gitignore`) committed as `cfc3dbe`. All Phase 1 design questions resolved and folded into this file, committed as `6ada8df`. `CLAUDE.md` and `README.md` now live in the repo root alongside `cli.py` and are tracked, so project memory is versioned with the code it describes. `requirements.txt` re-saved as ASCII and installable.
+**Next task:** 1.1 — `harness/state.py`: `TaskState`, `Plan`, `FileEdit`, `ReviewVerdict`, `TestResult`, `ReviewerRejection`, `TesterFailure`, and the status enum. Zero API calls.
+**Open questions:** none
