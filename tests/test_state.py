@@ -85,6 +85,26 @@ class TestConstruction:
             FileEdit(path="a.py", new_content="x = 1", mode="append")
 
 
+class TestTestResultModel:
+    def test_summary_parsed_is_required(self):
+        with pytest.raises(ValidationError) as exc_info:
+            TestResult(passed=False, failed_tests=[], traceback="", stdout="", exit_code=1)
+
+        assert "summary_parsed" in str(exc_info.value)
+
+    def test_an_unreadable_summary_is_distinct_from_nothing_failing(self):
+        """`failed_tests == []` alone cannot tell these two apart."""
+        nothing_failed = TestResult(
+            passed=True, failed_tests=[], summary_parsed=True, traceback="", stdout="", exit_code=0
+        )
+        could_not_tell = TestResult(
+            passed=False, failed_tests=[], summary_parsed=False, traceback="boom", stdout="", exit_code=2
+        )
+
+        assert nothing_failed.failed_tests == could_not_tell.failed_tests == []
+        assert nothing_failed.summary_parsed != could_not_tell.summary_parsed
+
+
 class TestReviewVerdict:
     def test_violated_constraints_is_required_even_when_approving(self):
         with pytest.raises(ValidationError) as exc_info:
@@ -192,6 +212,7 @@ class TestFullStateRoundTrip:
             test_result=TestResult(
                 passed=True,
                 failed_tests=[],
+                summary_parsed=True,
                 traceback="",
                 stdout="4 passed",
                 exit_code=0,

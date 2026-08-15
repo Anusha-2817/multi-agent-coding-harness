@@ -104,6 +104,13 @@ class TestResult(_Model):
 
     passed: bool
     failed_tests: list[str]  # pytest nodeids, e.g. "tests/test_x.py::test_y"
+    # False only when a per-test outcome set was expected and could not be read:
+    # a collection error, an internal crash. Without it, `failed_tests == []`
+    # would conflate "nothing failed" with "something failed and we could not
+    # tell which" -- the same collapse `edits` avoids by being Optional rather
+    # than defaulting to []. Required, with no default: a default of True would
+    # silently claim a summary was read.
+    summary_parsed: bool
     traceback: str  # empty string when passed
     stdout: str
     exit_code: int
