@@ -43,8 +43,8 @@ Build order. Phases 1–2 make **zero API calls**.
 | Phase | Contents | Status |
 | ----- | -------- | ------ |
 | 0 | Scaffold, CLAUDE.md, first commit | done |
-| 1 | `TaskState` + all models, `EventLog`, fixture repo 1, Tester, unit tests | next |
-| 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), scripted failure tests | |
+| 1 | `TaskState` + all models, `EventLog`, fixture repo 1, Tester, unit tests | done |
+| 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), scripted failure tests | in progress — 2.1, 2.2 done |
 | 3 | LLM client wrapper, real Planner, real Implementer, approval gate, apply step, real Reviewer, `--stub`/`--real` switch | |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | |
 | 5 | Fixture repos 2–3, Reviewer-rejection scenario, saved transcripts, README update | |
@@ -184,8 +184,6 @@ Deliberately a superset of what `TesterFailure` needs, because the **harness** �
 
 ### Agent contracts
 
-Each agent declares `requires` and `produces`. The base class asserts required fields are present and non-None **before** calling the LLM, and raises naming the agent and the missing field.
-
 | Agent       | requires                            | produces      | must never read       |
 | ----------- | ----------------------------------- | ------------- | --------------------- |
 | Planner     | `task_description`, `failure_input` | `plan`        | `diff`, `test_result` |
@@ -194,6 +192,63 @@ Each agent declares `requires` and `produces`. The base class asserts required f
 | Tester      | `repo_path`                         | `test_result` | `plan`, `diff`        |
 
 This is the enforcement half of role purity. Prompts are suggestions; missing fields are guarantees.
+
+**The contracts live in one table, `CONTRACTS` in `harness/agents/base.py`.** No agent restates its own. Four entries side by side is how role purity gets checked — you read the whole thing at once and see that `test_result` appears in exactly one `produces` and no `requires`. Per-subclass declarations would scatter the same information across four files, each copy free to drift from this one. A subclass sets `name` and nothing else.
+
+`Contract` is `{requires: tuple, produces: str, optional: tuple}`. `produces` is a single field name, not a tuple — every agent writes exactly one field, and a tuple would invite one that writes two. `optional` is how "`plan` (+ `evidence` on retry)" is expressed: passed to the agent whether or not it is set, never asserted, so the signature does not change shape between a first attempt and a retry.
+
+### How the two halves are enforced
+
+**`requires`** — `Agent.run` checks the fields are present and non-None before the agent runs, and raises `AgentContractError` naming the agent and **every** missing field at once. Not a bare `assert`: `python -O` strips those, and this is an invariant, not a debug aid.
+
+**"must never read"** — enforced by omission, not by a rule. `run` calls the subclass's `_run` with exactly `requires + optional` and nothing else, so the Reviewer's `_run(*, plan, diff)` has no `test_result` in scope to be tempted by. Invariant 2 holds by construction rather than by the Reviewer's good manners. This also makes the contract self-checking: `run` binds the signature before calling, so a subclass whose parameters have drifted from the table fails on its first call rather than silently reading the wrong thing. Binding rather than catching `TypeError` around the call keeps a contract mismatch distinct from a genuine `TypeError` raised inside the agent.
+
+**`produces`** — the base class writes the field; `_run` only returns a value, and no agent is in a position to write a field it does not own. Returning `None` is a contract violation too: an agent that ran and produced nothing has broken its contract as surely as one called without its inputs.
+
+`AgentContractError` is fatal and nothing catches it. A violation means the loop routed to an agent whose inputs are not ready — a harness bug, not a task outcome. `Status` has no value for it on purpose: the run does not end in a state worth recording, it ends in a stack trace worth reading.
+
+### The agent signature
+
+```python
+Agent.__init__(self, event_log: EventLog)      # collaborators go here
+Agent.run(self, state: TaskState) -> TaskState  # public, uniform, never overridden
+Agent._run(self, *, <contracted fields>) -> <produced value>  # what a subclass writes
+```
+
+The `EventLog` is a constructor dependency, which is what resolves the Tester's apparent asymmetry — it isn't special, it just got built first. Anything else an agent needs goes the same way: the Tester's `timeout`, the LLM client in Phase 3.
+
+`run` **returns a new state and never mutates.** The control loop owns state transitions, and an agent mutating in place would make any before/after pair in the event log a record of the same object twice.
+
+The new state is built with `TaskState.model_validate(...)`, not `model_copy(update=...)` — `model_copy` does not validate, so a subclass returning the wrong type would land it in state unchecked and surface much later with nothing pointing back. Revalidation also covers `list[FileEdit]`, where an `isinstance` check would not: a list of the wrong thing is still a list.
+
+`attempt` is read from `state.attempt_count`, never passed. `Agent.log(event=, payload=)` stamps a subclass's own domain events with it. Planner events therefore carry `attempt=0`, since the counter increments on the Implementer.
+
+The base class logs `agent_produced` (payload keyed by the produced field name) and `contract_violation` (logged before the raise, so the log shows why the run died). Subclasses log their own domain events on top and must not re-log the produced value — the Tester logs `test_run_started` and lets `agent_produced` carry the `TestResult`.
+
+---
+
+### Stub agents
+
+`harness/agents/stubs.py` holds `StubPlanner`, `StubImplementer`, `StubReviewer` — the three LLM-backed roles. The Tester is real from Phase 1 and is never stubbed.
+
+**A stub is scripted, not smart.** Each takes a sequence of return values and hands out one per call, indexed by call count, deciding nothing. A `StubImplementer` that read `evidence` and "fixed itself" on the third attempt would turn every loop test into a test of the stub's cleverness instead of the loop's routing — the assertion would still pass if the loop had routed nothing back at all.
+
+Two capabilities beyond returning a value, both there so loop tests can assert something:
+
+- **`seen`** records the kwargs each call received. "Retry with evidence" is otherwise untestable: you can see a second attempt happen, but not that the failure was carried into it.
+- **`ScriptExhausted`** when the script runs out. A loop that ran six times against a five-entry script must fail loudly; repeating the last entry would let a runaway loop look like a passing test. `StubPlanner` takes a sequence too, even though v1 plans exactly once — a one-entry script makes "the loop never replans" an assertion rather than a hope.
+
+Stubs decide nothing about success, either. The **real Tester** does, by running real pytest against whatever the edits produced. So "fail twice, then succeed" is expressed as three edit lists, not as a flag.
+
+### Edit generators for the fixture
+
+`tests/fixture_edits.py` builds those edit lists by reading the fixture's `discounts.py` and substituting into it — never by inlining a module body. An inlined copy would be a second source of truth for the fixture and would rot the first time the fixture changed, in a way no test would catch: the copy would still compile and still fail.
+
+`failing_edits(n)` leaves the bug in place and appends a `# attempt n` marker. The marker is load-bearing. Every attempt starts from an identical baseline, so two edits that both merely leave the bug render **byte-identical** diffs — which trips the livelock check on attempt 2 and halts a run the test meant to send around the retry path. Successive failing variants must differ byte-wise; passing the *same* marker twice is how a test asks for a livelock, and there is no separate generator for it.
+
+`fixing_edits()` applies the one-character fix. `broken_edits()` leaves the file unparseable, which is the only way to reach the `summary_parsed=False` branch — the Implementer cannot otherwise produce a suite that will not collect.
+
+All three are verified end to end through the real Tester: red is really red, green is really green. A generator that quietly produced two green suites would make every "fail twice, then succeed" test pass for the wrong reason.
 
 ---
 
@@ -240,7 +295,9 @@ status: running | succeeded | escalated_retry_limit | escalated_livelock | abort
 
 `max_attempts = 5` means **five Implementer runs.** `attempt_count` increments when the Implementer runs — not when something fails — so the number always answers "how many diffs has this task produced."
 
-A livelock halt does **not** consume an attempt. It ends the run on the spot; there is no next attempt for the count to describe.
+At a livelock halt, `attempt_count` reflects the Implementer runs that occurred — **including the one that produced the duplicate.** The Implementer ran, so the counter incremented; the rule above has no exceptions. The cap is simply never reached on this path, because a livelock ends the run on the spot rather than routing back.
+
+(This replaces an earlier line saying a livelock "does not consume an attempt." That was vacuous — nothing is left to consume an attempt *for* once the run has halted — and it left the counter's value at a livelock halt genuinely ambiguous, which matters as soon as a test has to assert a number.)
 
 ### Human rejection at the approval gate
 
@@ -319,7 +376,8 @@ harness/
   loop.py           the control loop: routing, retries, escalation
   llm.py            LLM client wrapper (HTTP retry/backoff lives here)
   agents/
-    base.py         Agent ABC, requires/produces assertion
+    base.py         Agent ABC, CONTRACTS table, requires/produces assertion
+    stubs.py        scripted stand-ins for the three LLM-backed agents
     planner.py
     implementer.py
     reviewer.py
@@ -351,8 +409,16 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 1 — complete
-**Last completed:** 1.4 — `harness/workspace.py` (`prepare_run_dir`, `reset_run_dir`, `run_dir_for`) and `harness/agents/tester.py` (`Tester`, `tester_failure_from`). `tests/test_tester.py`: 30 tests run against the real `fixture_repo_1`, not a mock — the Tester's whole job is reporting what a real subprocess said, so a stubbed subprocess would only test the stub. Suite is 82 tests, all passing, about 40s because of the real pytest subprocesses.
+**Phase:** 2 — in progress
+**Last completed:** 2.2 — `harness/agents/stubs.py` (`StubPlanner`, `StubImplementer`, `StubReviewer`, `Script`, `ScriptExhausted`) and `tests/fixture_edits.py` (`failing_edits`, `fixing_edits`, `broken_edits`, `write_edits`). `tests/test_stubs.py`: 24 tests, the last five of which run the generators through the real Tester to prove red is red and green is green. See "Stub agents" and "Edit generators for the fixture" above.
+
+`tests/fixture_edits.py` is a helper module, not a test module — it is importable as top-level `fixture_edits` because pytest's default `prepend` import mode puts `tests/` on `sys.path`. Do not add `tests/__init__.py`; that would change how the existing test modules are imported.
+
+`write_edits` is a test-only stand-in for the apply step, which is Phase 3. It must not grow into the real one — the real apply lands *behind* the human-approval gate, and a helper that quietly applies edits is the shape of the thing invariant 1 exists to prevent.
+
+Previously: 2.1 — `harness/agents/base.py`: `Agent` ABC, the `CONTRACTS` table, `Contract`, `AgentContractError`. `tester.py` refitted onto it: `Tester(Agent)` with `name = "tester"` and `_run(*, repo_path)`; `run(repo_path, attempt=)` and the `test_run_completed` event are gone. `tests/test_agent_base.py`: 28 tests. `tests/test_tester.py` updated for the reshaped signature — a `run_tester` helper unwraps to the `TestResult` so the pytest-reporting tests read as they did, plus a `TestAgentInterface` class for the state-level contract. Suite is 139 tests, all passing, about 57s.
+
+Previously: 1.4 — `harness/workspace.py` (`prepare_run_dir`, `reset_run_dir`, `run_dir_for`) and `harness/agents/tester.py` (`Tester`, `tester_failure_from`). `tests/test_tester.py`: 30 tests run against the real `fixture_repo_1`, not a mock — the Tester's whole job is reporting what a real subprocess said, so a stubbed subprocess would only test the stub. Suite is 82 tests, all passing, about 40s because of the real pytest subprocesses.
 
 Then the `summary_parsed` decision, folded in above: added to `TestResult`, decided from the exit code, `True` on timeout, `False` on collection errors and crashes. The Tester's `requires`/`produces` class attributes were removed — unenforced until Phase 2's base class defines the real shape, and unenforced contracts drift.
 
@@ -368,8 +434,14 @@ Decisions folded in so far: the `Plan` shape with `target_files` as a mechanical
 
 Conventions worth not re-litigating: `None` means "not yet produced" and is what the agent contract assertion checks — so `edits` is `Optional`, never defaulting to `[]`, or "never ran" and "ran and produced nothing" become indistinguishable. Harness-owned fields with a meaningful empty value (`attempt_count`, `previous_diffs`, `status`) get real defaults instead. `extra="forbid"` everywhere. Paths are `str` in models, never `Path`, so state round-trips through the JSONL log with no custom serializer. `max_attempts` is a module constant in `loop.py`, not a `TaskState` field. The event log degrades a bad payload rather than raising — logging must not be able to kill a run.
 
-**Next task:** Phase 2 — Agent base class with the requires/produces assertion, stub agents, and the control loop (routing, retry, livelock, escalation) with scripted failure tests. Still zero API calls.
+**Next task:** 2.3 — the control loop in `harness/loop.py`: routing, retry with evidence, the livelock check, the retry cap, escalation. Still zero API calls.
 
-Two things Phase 2 owes: the agent base class declares each agent's `requires`/`produces` (no agent restates them locally), and the loop must branch on `summary_parsed=False` to escalate rather than retry.
+What 2.3 owes, with the pieces now in place to test each:
+
+- Branch on `summary_parsed=False` to **escalate, not retry** — `broken_edits()` is the input that reaches it.
+- Livelock check **immediately after the Implementer, before Review**. The assertion that proves the ordering is that the Reviewer stub was never called a second time.
+- Append to `previous_diffs` **after** the livelock check passes, not before. Appending first leaves the duplicate in the list and puts every count off by one: at a livelock halt `previous_diffs` holds one entry and `attempt_count` is 2.
+- The human-approval gate as an injectable callback — the one allowed seam. Loop tests drive it with `True`, `False` (→ `aborted_by_human`), and scripted sequences.
+- The retry-cap test needs **five distinct** failing variants; identical ones would trip the livelock check first and never reach the cap.
 
 **Open questions:** none

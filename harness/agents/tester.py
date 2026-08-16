@@ -17,6 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from harness.agents.base import Agent
 from harness.events import EventLog
 from harness.state import TesterFailure, TestResult
 
@@ -113,39 +114,41 @@ def _failure_detail(stdout: str) -> str:
     return "\n".join(lines[start:end]).strip()
 
 
-class Tester:
+class Tester(Agent):
     """Runs the suite in `repo_path` and reports the result.
 
-    Contract, per CLAUDE.md: requires `repo_path`, produces `test_result`, must
-    never read `plan` or `diff`. Declared and enforced by the agent base class
-    in Phase 2, not restated here -- an unenforced copy would drift.
+    Its contract lives in `CONTRACTS["tester"]`, not here: requires `repo_path`,
+    produces `test_result`. The "must never read `plan` or `diff`" half needs no
+    declaration at all -- `_run` is handed `repo_path` and nothing else, so there
+    is no plan in scope to be tempted by.
+
+    `timeout` is an extra constructor argument, not an extra `run` argument. The
+    public signature stays `run(state) -> TaskState` like every other agent; how
+    long this one is willing to wait for a subprocess is its own business.
     """
 
+    name = "tester"
+
     def __init__(self, event_log: EventLog, timeout: float = DEFAULT_TIMEOUT) -> None:
-        self.event_log = event_log
+        super().__init__(event_log)
         self.timeout = timeout
 
-    def run(self, repo_path: str, *, attempt: int = 0) -> TestResult:
-        """Clear caches, run the whole suite, and report what pytest said."""
+    def _run(self, *, repo_path: str) -> TestResult:
+        """Clear caches, run the whole suite, and report what pytest said.
+
+        Only `test_run_started` is logged here. The result is carried by the base
+        class's `agent_produced` event, so logging a completion event too would
+        put the same `TestResult` in the log twice.
+        """
         directory = Path(repo_path)
         _clear_caches(directory)
 
-        self.event_log.append(
-            attempt=attempt,
-            agent="tester",
+        self.log(
             event="test_run_started",
             payload={"repo_path": str(directory), "timeout": self.timeout},
         )
 
-        result = self._invoke_pytest(directory)
-
-        self.event_log.append(
-            attempt=attempt,
-            agent="tester",
-            event="test_run_completed",
-            payload={"test_result": result},
-        )
-        return result
+        return self._invoke_pytest(directory)
 
     def _invoke_pytest(self, directory: Path) -> TestResult:
         try:
