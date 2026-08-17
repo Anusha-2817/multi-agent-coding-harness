@@ -399,7 +399,15 @@ M. test           tester.run(state)
 
 **`attempt_count` increments at B, before `implementer.run`.** `Agent.run` reads `state.attempt_count` at its top to stamp its own events, so incrementing afterwards would file the Implementer's events under the previous attempt. It is also what makes "Planner events carry `attempt=0`" true.
 
-**B also clears `edits`, `diff`, `review`, and `test_result` back to `None`.** Without it, a run halting at the scope check on attempt 2 would return attempt 1's *approving* verdict and its passing-shaped `test_result` — stale values in fields where `None` is supposed to mean "not yet produced". `evidence` is the deliberate exception; carrying the last failure forward is its whole job. One consequence worth knowing before writing assertions: a run that fails once and then succeeds ends with `status=succeeded` **and** `evidence` still holding the failure that was corrected. That is intended, not a leak.
+**B also clears `edits`, `diff`, `review`, and `test_result` back to `None`.** Without it, a run halting at the scope check on attempt 2 would return attempt 1's *approving* verdict and its passing-shaped `test_result` — stale values in fields where `None` is supposed to mean "not yet produced".
+
+### evidence survives; that is the point
+
+`evidence` is the deliberate exception to the clearing above, and it survives all the way into a terminal `succeeded` state. A run that fails once and then succeeds ends with `status=succeeded` **and** the `TesterFailure` it recovered from still in `evidence`.
+
+That is not a leak, and it must not be "fixed". Such a state is telling the truth: it succeeded *on retry*, and this is what it recovered from. Recovery is the point of the harness — the whole project is the loop, not the model — so erasing the failure from the terminal state would discard the most interesting thing about the run. A caller wanting "did this need a retry" reads `attempt_count`; a caller wanting "what went wrong on the way" reads `evidence`. Neither question is answerable from the other.
+
+Asserted directly, in `TestRetryOnTestFailure.test_evidence_survives_into_a_succeeded_state`.
 
 **The counter moves before the physical reset (B before C)** so `baseline_reset` is stamped with the attempt it prepares for. The reset is the first act of the new attempt, not the last act of the old one.
 
@@ -578,10 +586,26 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 2 — in progress
-**Last completed:** 2.3 — `harness/loop.py` (`run_task`, `render_diff`, `MAX_ATTEMPTS`, `LIVELOCK_REASON`), `workspace.apply_edits` and `workspace.normalize_path`, `Status.ESCALATED_BROKEN_SUITE`, `StubApprover`, and `out_of_scope_edits()`. `write_edits` now delegates to `apply_edits`. See "The control loop" above for the whole of it.
+**Phase:** 2 — complete
+**Last completed:** 2.4 — `tests/test_loop.py`, 81 tests. Suite is **220 tests, all passing, about 103s.**
 
-Suite is still 139 tests, all passing, about 64s — **2.3 shipped with no tests of its own; `tests/test_loop.py` is 2.4.** The loop was smoke-checked outside the suite across nine scenarios (happy, fail-then-fix, livelock, retry cap, human rejection, review rejection, scope violation, broken suite, backslash path), and every count CLAUDE.md pins down came out right: livelock halts at `attempt_count=2` with one entry in `previous_diffs` and one Reviewer call; the cap halts at 5; a rejected diff leaves the baseline on disk. Those scenarios are the shape 2.4 should take, but none of them is committed — **the loop is currently unverified by anything that runs in CI.**
+Organised as one class per branch of the loop, each driving one scenario and asserting the pinned numbers. What the classes are for:
+
+`TestHappyPath`, `TestRetryOnTestFailure` (evidence carried in, and surviving), `TestBaselineReset` (attempt 2's diff carries only its own marker), `TestLivelock`, `TestRetryCap`, `TestHumanRejection`, `TestReviewRejection`, `TestScopeCheck`, `TestPerAttemptFieldsAreCleared`, `TestBrokenSuite`, `TestNoEdits`, `TestPathNormalization`, `TestTheRenderedDiff`, `TestInvariantOne`, `TestTheEventLog`.
+
+Three assertion styles carry most of the weight, and each exists because the terminal state alone cannot show what happened:
+
+- **A stub's call count proves ordering.** `len(reviewer.seen) == 1` on a two-attempt livelock run is what proves the check runs before Review. `len(approver.seen) == 1` on a review rejection proves the gate is downstream of the verdict. `reviewer.seen == []` proves the scope check is upstream of both.
+- **Byte identity across the three views proves invariant 1's "on that specific diff".** `approver.seen == diffs_reviewed`, on every attempt, plus a re-render against a pristine copy showing that the approved bytes describe exactly what reached disk.
+- **The event log proves attribution and attempt stamping.** One test asserts the exact 25-event sequence of a fail-then-fix run; others assert Planner events at `attempt=0`, every attempt opening with its own `baseline_reset`, and `run_finished` appearing exactly once on all four halting paths.
+
+**Scenario fixtures are class-scoped `@classmethod`s.** Every attempt costs a `copytree` plus a real pytest subprocess, so a scenario several tests assert against is run once and shared — function scope made the module 213s instead of 55s, because `TestRetryCap` alone re-ran five attempts for each of its six tests. `@classmethod` rather than a plain method because pytest 10 removes class-scoped fixtures defined as instance methods. Sharing is safe only because nothing mutates a `Run`; a test needing to write into the run directory must take its own function-scoped scenario.
+
+Decided during 2.4 and now asserted: **`evidence` survives into a `succeeded` terminal state** — see "evidence survives; that is the point" above.
+
+Not covered, deliberately: `Status.ESCALATED_BROKEN_SUITE` has no serialization test in `test_state.py` beside the `ESCALATED_LIVELOCK` one. The loop tests exercise it end to end and assert its value round-trips through the log, which is stronger.
+
+Previously: 2.3 — `harness/loop.py` (`run_task`, `render_diff`, `MAX_ATTEMPTS`, `LIVELOCK_REASON`), `workspace.apply_edits` and `workspace.normalize_path`, `Status.ESCALATED_BROKEN_SUITE`, `StubApprover`, and `out_of_scope_edits()`. `write_edits` now delegates to `apply_edits`. See "The control loop" above for the whole of it.
 
 Decisions folded in from the 2.3 design pass, each argued in full above: agents as `run_task` parameters (operands, not a seam); `escalated_broken_suite` as a sixth status; the gate and apply step moved from Phase 3; per-attempt clearing of `edits`/`diff`/`review`/`test_result` with `evidence` surviving; normalized path comparison in the scope check; `render_diff` in `loop.py`; reset at top-of-iteration; `approve(diff) -> bool`; the no-edits branch; and the thirteen harness event names.
 
@@ -609,23 +633,14 @@ Decisions folded in so far: the `Plan` shape with `target_files` as a mechanical
 
 Conventions worth not re-litigating: `None` means "not yet produced" and is what the agent contract assertion checks — so `edits` is `Optional`, never defaulting to `[]`, or "never ran" and "ran and produced nothing" become indistinguishable. Harness-owned fields with a meaningful empty value (`attempt_count`, `previous_diffs`, `status`) get real defaults instead. `extra="forbid"` everywhere. Paths are `str` in models, never `Path`, so state round-trips through the JSONL log with no custom serializer. `max_attempts` is a module constant in `loop.py`, not a `TaskState` field. The event log degrades a bad payload rather than raising — logging must not be able to kill a run.
 
-**Next task:** 2.4 — `tests/test_loop.py`. Still zero API calls. The loop is written and reviewed; nothing in the suite exercises it.
+**Next task:** the entrypoint — `cli.py` is still empty, and it is now the only thing between a working harness and a runnable one. Nothing yet reads `task.json`, calls `make_task_id()`, calls `prepare_run_dir`, constructs the `TaskState`, or supplies a real terminal approval callback. `run_task` was written to be driven by exactly that and is driven by nothing today.
 
-What 2.4 owes. Every input needed for these now exists:
+Everything it needs already exists and is tested. The open shape questions are small and local to `cli.py`:
 
-- **Happy path** → `succeeded`, `attempt_count == 1`.
-- **Fail then fix** → `succeeded` at 2, with `implementer.seen[1]["evidence"]` a `TesterFailure` carrying the real nodeid. Seeing a second attempt happen is not the assertion; seeing the failure carried into it is.
-- **Livelock** — `failing_edits(1)` twice → `escalated_livelock`, `attempt_count == 2`, one entry in `previous_diffs`, and `len(reviewer.seen) == 1`. That last one is what proves the check runs before Review.
-- **Retry cap** — five **distinct** failing variants → `escalated_retry_limit` at 5. Identical ones would trip livelock first and never reach the cap.
-- **Human rejection** → `aborted_by_human` at 1, `test_result is None`, and the fixture's bug still on disk in the run directory. Assert the last one: it is invariant 1 end to end.
-- **Review rejection** → routes back with a `ReviewerRejection`, and `len(approver.seen) == 1` proves the gate was never offered a rejected diff.
-- **Scope violation** — `out_of_scope_edits()` → routes back, `violated_constraints == ["pricing/money.py"]`, `reviewer.seen` empty, `previous_diffs` untouched.
-- **Broken suite** — `broken_edits()` → `escalated_broken_suite` at 1.
-- **A backslash path is not a scope violation** — `pricing\discounts.py` against a plan targeting `pricing/discounts.py` must succeed.
-- **The event log** — `run_finished` appears exactly once; `baseline_reset` opens every attempt; Planner events carry `attempt=0`.
+- What the terminal gate prints before asking. The diff is the only thing `approve` receives, but `cli.py` builds the callback and holds the state, so it can show the plan and the verdict alongside — see the note on widening `approve` under "The control loop".
+- What a run reports on exit, per status. Four of the five terminal statuses are failures with different causes, and Phase 4 owns "escalation output" — so keep this to something plain and leave the packaging to that phase.
+- Whether `--stub` needs scripts at all. A stub run from the CLI has no test to script it; the honest options are a fixed one-attempt script or dropping `--stub` from the CLI and leaving stubs to the tests. Decide before building it.
 
-Two things to know before writing assertions. `evidence` **survives** into a successful terminal state, so a fail-then-fix run ends `succeeded` with the corrected failure still in `evidence`. And every scenario costs a `copytree` plus a real pytest subprocess per attempt — the retry-cap one costs five of each — so this will be the slowest module in the suite by some margin.
+Phases 1–2 made zero API calls and that held. Phase 3 is the first one that does not.
 
 **Open questions:** none
-
-Known gaps, not questions: `cli.py` is still empty, so nothing yet builds a `TaskState` from `task.json`, generates the `task_id`, calls `prepare_run_dir`, or supplies a real terminal approval callback. That is the wiring 2.5 or Phase 3 owes; `run_task` is written to be driven by it and is not driven by anything today.
