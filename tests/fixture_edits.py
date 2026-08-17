@@ -23,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from harness.state import FileEdit
+from harness.workspace import apply_edits
 
 FIXTURE = Path(__file__).resolve().parent.parent / "tasks" / "fixture_repo_1"
 
@@ -30,6 +31,9 @@ FIXTURE = Path(__file__).resolve().parent.parent / "tasks" / "fixture_repo_1"
 #: is compared against `Plan.target_files` by the scope check, so the spelling
 #: has to be stable.
 DISCOUNTS = "pricing/discounts.py"
+
+#: A real file in the fixture that no plan targets. Used to drive the scope check.
+MONEY = "pricing/money.py"
 
 # The injected bug: `>` where `>=` was meant, so a quantity landing exactly on a
 # tier boundary gets the tier below.
@@ -66,6 +70,24 @@ def fixing_edits(fixture: Path = FIXTURE) -> list[FileEdit]:
     return [FileEdit(path=DISCOUNTS, new_content=fixed)]
 
 
+def out_of_scope_edits(fixture: Path = FIXTURE) -> list[FileEdit]:
+    """An edit to a real fixture file that no plan targets.
+
+    Drives the mechanical scope check. Read from `pricing/money.py` rather than
+    inlined for the reason at the top of this module -- an inlined copy would rot
+    the first time the fixture changed, and nothing would catch it.
+
+    Note what is *not* here: an `attempt` marker. The failing variants need one
+    because they render diffs that must differ byte-wise, but a scope-violating
+    attempt is caught before the render and contributes nothing to
+    `previous_diffs`. Two identical out-of-scope edits therefore cannot livelock;
+    they retry until the cap. That is a real property of the loop, and this
+    generator being marker-free is the honest way to test it.
+    """
+    text = (fixture / MONEY).read_text(encoding="utf-8")
+    return [FileEdit(path=MONEY, new_content=f"{text}\n# touched by the implementer\n")]
+
+
 def broken_edits(fixture: Path = FIXTURE) -> list[FileEdit]:
     """An edit that leaves `discounts.py` unparseable.
 
@@ -78,15 +100,16 @@ def broken_edits(fixture: Path = FIXTURE) -> list[FileEdit]:
 
 
 def write_edits(repo_path: str | Path, edits: list[FileEdit]) -> None:
-    """Write `edits` into the run directory.
+    """Apply `edits` with no gate in front of them. Test support only.
 
-    Stands in for the harness's apply step, which is Phase 3. Test support only:
-    no baseline capture, no diff, no approval gate. Do not grow this into the
-    real one -- the real one lands behind the human-approval gate, and a helper
-    that quietly applies edits is the shape of the thing that invariant exists to
-    prevent.
+    Delegates to the real `workspace.apply_edits`, so there is exactly one
+    function in the project that writes a file the Implementer produced. What
+    this adds is a name for the bypass: the real apply is only ever called by the
+    control loop, after a Review verdict and a human approval on that specific
+    diff. Invariant 1 is a property of *that call site*, and every use of this
+    helper is a test deliberately stepping around it.
+
+    Which is why it stays in `tests/`. A helper in `harness/` that quietly
+    applies edits is the shape of the thing invariant 1 exists to prevent.
     """
-    for edit in edits:
-        target = Path(repo_path) / edit.path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(edit.new_content, encoding="utf-8", newline="\n")
+    apply_edits(repo_path, edits)

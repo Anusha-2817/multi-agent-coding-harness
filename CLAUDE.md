@@ -34,6 +34,8 @@ If a task seems to need one of these, stop and ask rather than building it.
 
 **One allowed seam:** the human-approval gate is an injectable callback, so the harness's own tests can drive it. That is the only injection point in v1. It exists because approval is on the critical path of every attempt and is otherwise untestable — not as a precedent for making other collaborators pluggable.
 
+**The four agents are parameters of `run_task`, and that is not a second seam.** They are the loop's operands, not a hidden pluggability point: `cli.py` chooses stubs or real ones from `--stub`, and the loop never learns which it got. A `stub: bool` flag would not work anyway — loop tests must hand in *specific scripts* (`failing_edits(1), failing_edits(2), fixing_edits()`), and a boolean cannot express those. The distinction that matters: `approve` is a seam because it stands in for a human, whereas the agents were always going to be passed in by someone.
+
 ---
 
 ## Phases
@@ -44,14 +46,16 @@ Build order. Phases 1–2 make **zero API calls**.
 | ----- | -------- | ------ |
 | 0 | Scaffold, CLAUDE.md, first commit | done |
 | 1 | `TaskState` + all models, `EventLog`, fixture repo 1, Tester, unit tests | done |
-| 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), scripted failure tests | in progress — 2.1, 2.2 done |
-| 3 | LLM client wrapper, real Planner, real Implementer, approval gate, apply step, real Reviewer, `--stub`/`--real` switch | |
+| 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), the approval gate and apply step, scripted failure tests | in progress — 2.1, 2.2, 2.3 done |
+| 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | |
 | 5 | Fixture repos 2–3, Reviewer-rejection scenario, saved transcripts, README update | |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
 
 The Tester lands in Phase 1, before any agent scaffolding, because it is the only agent that needs no LLM and because a working Tester is what makes Phase 2's scripted failures verifiable.
+
+**The approval gate and the apply step moved from Phase 3 to Phase 2.3.** The original table was wrong, not revised: the loop cannot be tested without them. With no apply, the Tester runs against an untouched baseline, every attempt is red, and nothing can ever go green — the happy path, "fail twice then succeed", and the `summary_parsed=False` escalation all become unreachable. The gate is on the critical path of every attempt for the same reason. Phase 3 keeps the three LLM-backed agents and the client wrapper, which is what it was really about.
 
 ---
 
@@ -69,15 +73,20 @@ The Tester lands in Phase 1, before any agent scaffolding, because it is the onl
 ## Order of operations
 
 ```
-Plan → Implement → [scope check] → [render diff] → [livelock check] → Review → [human approval] → Apply → Test
-          ↑                                                                                              │
-          └──────────────────────── reset to baseline (re-copy fixture) ────────────────────────────────┘
-                                    (on reject or fail)
+Plan → [reset] → Implement → [no-edits check] → [scope check] → [render diff] → [livelock check]
+                     ↑                                                                │
+                     │                                                                ▼
+                     │                          Review → [human approval] → Apply → Test
+                     │                                                                │
+                     └──────── reset to baseline (re-copy fixture) ───────────────────┘
+                               (on no edits, scope violation, rejection, or test failure)
 ```
 
 Review happens **before** apply. A rejected diff never touches disk. The permission boundary is drawn at reversibility.
 
-Scope check, render, and livelock check are harness steps, not agents. They sit between Implement and Review so that an out-of-scope or duplicate diff is caught before spending a review on it. Scope check runs first because it is the cheapest — it compares `edit.path` against `plan.target_files` and needs no rendered diff.
+The no-edits check, scope check, render, and livelock check are harness steps, not agents. They sit between Implement and Review so that an empty, out-of-scope, or duplicate diff is caught before spending a review on it. They are ordered by cost: the no-edits check is a length test, the scope check compares strings and needs no rendered diff, and only then is a diff rendered for the livelock check to compare.
+
+The reset is drawn at the **top** of each attempt rather than on the return edge. Same invariant, but one call site instead of four, so no failure path can forget one. It runs on the first attempt too, over a directory `cli.py` has just prepared — one redundant copy, in exchange for invariant 4 being structural rather than an agreement between branches.
 
 ---
 
@@ -240,6 +249,14 @@ Two capabilities beyond returning a value, both there so loop tests can assert s
 
 Stubs decide nothing about success, either. The **real Tester** does, by running real pytest against whatever the edits produced. So "fail twice, then succeed" is expressed as three edit lists, not as a flag.
 
+### StubApprover
+
+Also in `stubs.py`, but **not an `Agent`**: the approval gate is a callback, not a role. It has no contract, reads no state, and writes no field — the loop hands it a diff and gets a `bool` — so it shares `Script` with the agent stubs and nothing else.
+
+It exists because the gate is the one genuine seam in v1. Without a double here no loop test reaches the apply step at all, and `aborted_by_human` is unreachable.
+
+`seen` records the diffs it was shown. That is how a test proves invariant 1 the whole way through — that the bytes the human approved are the bytes the Reviewer saw and the bytes that reached disk — rather than merely that some approval happened somewhere.
+
 ### Edit generators for the fixture
 
 `tests/fixture_edits.py` builds those edit lists by reading the fixture's `discounts.py` and substituting into it — never by inlining a module body. An inlined copy would be a second source of truth for the fixture and would rot the first time the fixture changed, in a way no test would catch: the copy would still compile and still fail.
@@ -248,7 +265,9 @@ Stubs decide nothing about success, either. The **real Tester** does, by running
 
 `fixing_edits()` applies the one-character fix. `broken_edits()` leaves the file unparseable, which is the only way to reach the `summary_parsed=False` branch — the Implementer cannot otherwise produce a suite that will not collect.
 
-All three are verified end to end through the real Tester: red is really red, green is really green. A generator that quietly produced two green suites would make every "fail twice, then succeed" test pass for the wrong reason.
+`out_of_scope_edits()` edits `pricing/money.py`, a real fixture file no plan targets, and is what drives the mechanical scope check. Note what it deliberately lacks: an `attempt` marker. The failing variants need one because they render diffs that must differ byte-wise, but a scope-violating attempt is caught *before* the render and contributes nothing to `previous_diffs` — so two identical out-of-scope edits cannot livelock, and the marker would imply otherwise.
+
+All are verified end to end through the real Tester: red is really red, green is really green. A generator that quietly produced two green suites would make every "fail twice, then succeed" test pass for the wrong reason.
 
 ---
 
@@ -290,8 +309,17 @@ The **event log** does distinguish them: `scope_check_failed` and `review_reject
 ## Status and attempt counting
 
 ```python
-status: running | succeeded | escalated_retry_limit | escalated_livelock | aborted_by_human
+status: running | succeeded | escalated_retry_limit | escalated_livelock
+      | escalated_broken_suite | aborted_by_human
 ```
+
+`running` is the initial value and is never terminal. The other five are exactly the exit paths in "Branch points" below.
+
+### escalated_broken_suite
+
+Added in 2.3. The `summary_parsed=False` rule — *escalate, not retry* — had no status to halt with, and the other two escalations would both have been lies: no limit was reached and no diff repeated. `AgentContractError` is wrong too, by its own docstring; a suite that will not collect is a task outcome, not a harness bug, and it ends in a state worth recording.
+
+It is a third *kind* of escalation because the fault is a third thing. Retry limit means the Implementer kept missing; livelock means the plan is stuck; broken suite means the Implementer emitted something that does not parse. Collapsing any two would lose the only distinction the escalation output has to offer.
 
 `max_attempts = 5` means **five Implementer runs.** `attempt_count` increments when the Implementer runs — not when something fails — so the number always answers "how many diffs has this task produced."
 
@@ -301,7 +329,11 @@ At a livelock halt, `attempt_count` reflects the Implementer runs that occurred 
 
 ### Human rejection at the approval gate
 
-A human "no" **halts the run** with status `aborted_by_human`. It does not create a new evidence type, does not route back to the Implementer, and does not consume an attempt.
+A human "no" **halts the run** with status `aborted_by_human`. It does not create a new evidence type and does not route back to the Implementer.
+
+At the halt, `attempt_count` reflects the Implementer runs that occurred — **including the one that produced the rejected diff.** A first-attempt rejection leaves it at 1. The rule above has no exceptions: the Implementer ran, so the counter incremented.
+
+(This replaces an earlier line saying a human rejection "does not consume an attempt" — the same vacuous phrasing already retracted for livelock, and retracted here for the same reason. Nothing is left to consume an attempt *for* once the run has halted, and the phrasing left the counter's value genuinely ambiguous, which matters as soon as a test has to assert a number.)
 
 The human is rejecting for reasons the harness cannot see — out-of-band context about the repo, the task, or the approach. Feeding a retry that the harness can't articulate is asking the Implementer to guess at an objection it was never told, which is wasted work and wasted tokens. Stop, and let the human act on what they know.
 
@@ -314,6 +346,120 @@ Because every attempt starts from an identical baseline, two identical diffs are
 Comparison is literal byte equality. No whitespace normalization, no fuzzy matching. If the loop is genuinely stuck, the text will be identical; anything looser risks halting a run that was actually making progress.
 
 v1 diagnoses this. It does not act on it by replanning.
+
+---
+
+## The control loop
+
+`harness/loop.py`. Everything that decides what happens next lives here; the agents know nothing about each other.
+
+```python
+MAX_ATTEMPTS = 5   # module constant, not a TaskState field
+
+def run_task(
+    state: TaskState,
+    *,
+    fixture_path: str | Path,
+    planner: Agent, implementer: Agent, reviewer: Agent, tester: Agent,
+    event_log: EventLog,
+    approve: Callable[[str], bool],
+    runs_root: str | Path = RUNS_ROOT,
+) -> TaskState:                       # returns the terminal state
+```
+
+`fixture_path` is a parameter rather than a `TaskState` field because reset needs it and no agent does — it is harness plumbing, and the ownership table has no row for it. `runs_root` mirrors the existing optional parameter on `prepare_run_dir`/`reset_run_dir` so tests can point at `tmp_path`.
+
+`approve` receives the **rendered diff and nothing else**, per the ownership table. A Phase 3 CLI gate will probably want to display the Reviewer's verdict alongside it; widening to `approve(diff, review)` then is cheap, and starting narrow keeps the table honest in the meantime.
+
+The **Planner runs once, outside** the retry loop. v1 does not replan — routing rejections back to the Planner is a v2 item behind the scope fence — and a one-entry `StubPlanner` script turns that into an assertion.
+
+### One attempt
+
+```
+A. cap check      attempt_count >= 5?          → escalated_retry_limit
+B. new attempt    clear + increment
+C. reset          reset_run_dir(...)
+D. implement      implementer.run(state)
+E. no-edits       edits == []?                 → evidence, continue
+F. scope check    paths ⊄ target_files?        → evidence, continue
+G. render         render_diff(repo_path, edits)
+H. livelock       diff in previous_diffs?      → escalated_livelock
+I. append         previous_diffs += [diff]
+J. review         reviewer.run(state)
+                  rejected?                    → evidence, continue
+K. approval       approve(diff) is False?      → aborted_by_human
+L. apply          apply_edits(repo_path, edits)
+M. test           tester.run(state)
+                  summary_parsed False?        → escalated_broken_suite
+                  passed?                      → succeeded
+                  else                         → evidence, continue
+```
+
+**The cap check comes first (A), before the reset.** Partly so the escalating pass does not copy a tree it will not use, but mainly so the Implementer is never called a sixth time: a runaway loop halts with a status rather than by exhausting a stub's script, and the test asserts an outcome instead of an exception.
+
+**`attempt_count` increments at B, before `implementer.run`.** `Agent.run` reads `state.attempt_count` at its top to stamp its own events, so incrementing afterwards would file the Implementer's events under the previous attempt. It is also what makes "Planner events carry `attempt=0`" true.
+
+**B also clears `edits`, `diff`, `review`, and `test_result` back to `None`.** Without it, a run halting at the scope check on attempt 2 would return attempt 1's *approving* verdict and its passing-shaped `test_result` — stale values in fields where `None` is supposed to mean "not yet produced". `evidence` is the deliberate exception; carrying the last failure forward is its whole job. One consequence worth knowing before writing assertions: a run that fails once and then succeeds ends with `status=succeeded` **and** `evidence` still holding the failure that was corrected. That is intended, not a leak.
+
+**The counter moves before the physical reset (B before C)** so `baseline_reset` is stamped with the attempt it prepares for. The reset is the first act of the new attempt, not the last act of the old one.
+
+**`previous_diffs` is appended at I, after the livelock check passes.** Appending first would leave the duplicate in the list and put every count off by one.
+
+### Branch points
+
+| Where | Condition | Routes to | Status |
+| ----- | --------- | --------- | ------ |
+| A | `attempt_count >= MAX_ATTEMPTS` | halt | `escalated_retry_limit` |
+| E | `edits == []` | `ReviewerRejection`, continue | — |
+| F | any path outside `target_files` | `ReviewerRejection`, continue — Reviewer never called | — |
+| H | `diff in previous_diffs` | halt | `escalated_livelock` |
+| J | `review.approved is False` | `ReviewerRejection`, continue — gate never called | — |
+| K | `approve(diff) is False` | halt, nothing on disk | `aborted_by_human` |
+| M | `summary_parsed is False` | halt | `escalated_broken_suite` |
+| M | `passed is True` | halt | `succeeded` |
+| M | red and legible | `TesterFailure`, continue | — |
+
+### The no-edits branch
+
+`edits == []` is not a contract violation — only `None` is, and that distinction is deliberate — so the loop has to judge it. Left implicit it would apply nothing, test red, and read in the log as a *failed fix* rather than as no fix at all. It gets a `ReviewerRejection` with an empty `violated_constraints` and its own event, `no_edits_produced`.
+
+### Path normalization in the scope check
+
+Both `edit.path` and every `plan.target_files` entry go through `workspace.normalize_path` before comparison: posix separators, no leading `./`. Not exact string equality.
+
+An LLM Implementer on Windows will emit `pricing\discounts.py` sooner or later, and rejecting that as a scope violation would spend a retry on a path-separator bug while the log claimed the model had gone outside its plan — exactly the plumbing-versus-model ambiguity this phase exists to remove.
+
+The same function is used by `apply_edits`. That is load-bearing rather than tidy: if only the check normalized, it could accept a spelling that the write then resolved somewhere else. `..` is deliberately **not** resolved away — normalizing it would turn an escaping path into one that looks legitimate, and `apply_edits`'s containment check needs to still see it.
+
+The paths written into `violated_constraints` are the ones the Implementer **actually emitted**, not the normalized forms. The evidence should show the model what it wrote.
+
+### Rendering the diff
+
+`render_diff(repo_path, edits)` in `loop.py`. There is no `harness/diff.py`; one function does not earn a module.
+
+It reads the baseline from `repo_path`, which is valid only because the reset at C means what is on disk *is* the fixture. That is the whole reason two identical fixes render identical text.
+
+Three details keep the byte-equality the livelock check depends on:
+
+- **No timestamps.** `unified_diff`'s date arguments are left empty. Filling them makes every diff unique and livelock unreachable.
+- **Stable labels** — `a/<path>`, `b/<path>` from the normalized path, never absolute, which would embed `task_id` and with it a timestamp.
+- **Deterministic order** — edits sorted by path, so a multi-file change cannot render in two orders and read as progress.
+
+A file whose last line lacks a trailing newline gets one added to its chunk, so it cannot run into the next file's `--- a/...` header; `difflib` emits no "\ No newline at end of file" marker of its own. Line endings otherwise pass through as the Implementer wrote them — a model emitting CRLF gets a diff touching every line, which is honest, and silently rewriting model output would hide it.
+
+### What livelock cannot catch
+
+A scope-violating attempt is caught before the render, so it contributes nothing to `previous_diffs`. An Implementer stuck emitting the *same* out-of-scope edit will therefore never trip livelock; it retries to the cap and halts with `escalated_retry_limit`. Same for the no-edits branch. This follows correctly from livelock being defined over rendered diffs, but it means the two cheapest branches are outside its reach.
+
+### Apply
+
+`workspace.apply_edits(repo_path, edits) -> list[str]`. It lives in `workspace.py` because that module owns the run directory, and putting the write beside the reset that undoes it keeps the whole lifecycle readable in one place.
+
+It is the **only** function in the harness that writes a file the Implementer produced, and the control loop is its only caller. Invariant 1 is a property of that call site, not of the function — which is why nothing inside it checks for a verdict. Do not add a second caller.
+
+It raises `ValueError` if an edit resolves outside `repo_path`. That should be unreachable, since the scope check has already confined every path to `target_files`, so reaching it means either the check let something through or the plan named an escaping path. Fatal for the same reason `AgentContractError` is: a harness bug, not a task outcome, and `Status` has no value for it.
+
+`tests/fixture_edits.write_edits` now delegates to it, so there is one writer in the project. What the helper still contributes is a *name for the bypass*: every use of it is a test deliberately stepping around the gate. It stays in `tests/` for that reason — a helper in `harness/` that quietly applies edits is the shape of the thing invariant 1 exists to prevent.
 
 ---
 
@@ -332,6 +478,29 @@ Everything is inlined — full plans, full diffs, full tracebacks. No references
 The payload is serialized **before** the file is opened. If it fails to serialize, the event is still written, with the payload replaced by a `_serialization_error` marker and a truncated `repr`. A logging bug degrades one line; it never drops an event and never kills a run.
 
 Event names distinguish things the evidence types deliberately do not — `scope_check_failed` vs `review_rejected` being the case in point.
+
+### Harness events
+
+Written by the loop with `agent="harness"`, in the order they can appear:
+
+| Event | Payload |
+| ----- | ------- |
+| `run_started` | `task_id`, `fixture_path`, `repo_path`, `max_attempts` |
+| `baseline_reset` | `repo_path` |
+| `no_edits_produced` | — |
+| `scope_check_failed` | `paths`, `target_files` |
+| `diff_rendered` | `diff` |
+| `livelock_detected` | `diff`, `previous_diffs` (count) |
+| `review_rejected` | `reason`, `violated_constraints` |
+| `approval_granted` / `approval_denied` | — |
+| `edits_applied` | `paths` |
+| `test_failed` | `failed_tests`, `exit_code` |
+| `suite_not_collectable` | `exit_code`, `traceback` |
+| `run_finished` | `status`, `attempt_count`, `reason` |
+
+Two rules shape the set. **Every halt goes through `_halt`**, so `run_finished` appears exactly once per run and always carries the status; the diagnostic events before it carry the payloads it cannot. **A passing check logs nothing** — there is no `scope_check_passed`, because the `diff_rendered` that follows already proves it passed, and an event per non-event is noise in an append-only log.
+
+`test_failed` records the harness's *decision* to route back, not the `TestResult` — that is already on the Tester's `agent_produced`, and re-logging it would put the same object in the log twice.
 
 ---
 
@@ -372,8 +541,8 @@ Repo root is `mach/`.
 harness/
   state.py          TaskState, Plan, FileEdit, ReviewVerdict, TestResult, evidence types
   events.py         EventLog — append-only JSONL writer
-  workspace.py      run directory: prepare, reset. The fixture is never written to
-  loop.py           the control loop: routing, retries, escalation
+  workspace.py      run directory: prepare, reset, apply. The fixture is never written to
+  loop.py           run_task, render_diff, MAX_ATTEMPTS — routing, retries, escalation
   llm.py            LLM client wrapper (HTTP retry/backoff lives here)
   agents/
     base.py         Agent ABC, CONTRACTS table, requires/produces assertion
@@ -410,11 +579,17 @@ README.md
 Update this section at the end of every session. It is the first thing to read next session.
 
 **Phase:** 2 — in progress
-**Last completed:** 2.2 — `harness/agents/stubs.py` (`StubPlanner`, `StubImplementer`, `StubReviewer`, `Script`, `ScriptExhausted`) and `tests/fixture_edits.py` (`failing_edits`, `fixing_edits`, `broken_edits`, `write_edits`). `tests/test_stubs.py`: 24 tests, the last five of which run the generators through the real Tester to prove red is red and green is green. See "Stub agents" and "Edit generators for the fixture" above.
+**Last completed:** 2.3 — `harness/loop.py` (`run_task`, `render_diff`, `MAX_ATTEMPTS`, `LIVELOCK_REASON`), `workspace.apply_edits` and `workspace.normalize_path`, `Status.ESCALATED_BROKEN_SUITE`, `StubApprover`, and `out_of_scope_edits()`. `write_edits` now delegates to `apply_edits`. See "The control loop" above for the whole of it.
+
+Suite is still 139 tests, all passing, about 64s — **2.3 shipped with no tests of its own; `tests/test_loop.py` is 2.4.** The loop was smoke-checked outside the suite across nine scenarios (happy, fail-then-fix, livelock, retry cap, human rejection, review rejection, scope violation, broken suite, backslash path), and every count CLAUDE.md pins down came out right: livelock halts at `attempt_count=2` with one entry in `previous_diffs` and one Reviewer call; the cap halts at 5; a rejected diff leaves the baseline on disk. Those scenarios are the shape 2.4 should take, but none of them is committed — **the loop is currently unverified by anything that runs in CI.**
+
+Decisions folded in from the 2.3 design pass, each argued in full above: agents as `run_task` parameters (operands, not a seam); `escalated_broken_suite` as a sixth status; the gate and apply step moved from Phase 3; per-attempt clearing of `edits`/`diff`/`review`/`test_result` with `evidence` surviving; normalized path comparison in the scope check; `render_diff` in `loop.py`; reset at top-of-iteration; `approve(diff) -> bool`; the no-edits branch; and the thirteen harness event names.
+
+Previously: 2.2 — `harness/agents/stubs.py` (`StubPlanner`, `StubImplementer`, `StubReviewer`, `Script`, `ScriptExhausted`) and `tests/fixture_edits.py` (`failing_edits`, `fixing_edits`, `broken_edits`, `write_edits`). `tests/test_stubs.py`: 24 tests, the last five of which run the generators through the real Tester to prove red is red and green is green. See "Stub agents" and "Edit generators for the fixture" above.
 
 `tests/fixture_edits.py` is a helper module, not a test module — it is importable as top-level `fixture_edits` because pytest's default `prepend` import mode puts `tests/` on `sys.path`. Do not add `tests/__init__.py`; that would change how the existing test modules are imported.
 
-`write_edits` is a test-only stand-in for the apply step, which is Phase 3. It must not grow into the real one — the real apply lands *behind* the human-approval gate, and a helper that quietly applies edits is the shape of the thing invariant 1 exists to prevent.
+(`write_edits` was a test-only stand-in for the apply step while that step did not exist. As of 2.3 it delegates to the real `workspace.apply_edits` — see "Apply" above. It stays in `tests/` because what it now contributes is a name for the gate bypass, not an implementation.)
 
 Previously: 2.1 — `harness/agents/base.py`: `Agent` ABC, the `CONTRACTS` table, `Contract`, `AgentContractError`. `tester.py` refitted onto it: `Tester(Agent)` with `name = "tester"` and `_run(*, repo_path)`; `run(repo_path, attempt=)` and the `test_run_completed` event are gone. `tests/test_agent_base.py`: 28 tests. `tests/test_tester.py` updated for the reshaped signature — a `run_tester` helper unwraps to the `TestResult` so the pytest-reporting tests read as they did, plus a `TestAgentInterface` class for the state-level contract. Suite is 139 tests, all passing, about 57s.
 
@@ -434,14 +609,23 @@ Decisions folded in so far: the `Plan` shape with `target_files` as a mechanical
 
 Conventions worth not re-litigating: `None` means "not yet produced" and is what the agent contract assertion checks — so `edits` is `Optional`, never defaulting to `[]`, or "never ran" and "ran and produced nothing" become indistinguishable. Harness-owned fields with a meaningful empty value (`attempt_count`, `previous_diffs`, `status`) get real defaults instead. `extra="forbid"` everywhere. Paths are `str` in models, never `Path`, so state round-trips through the JSONL log with no custom serializer. `max_attempts` is a module constant in `loop.py`, not a `TaskState` field. The event log degrades a bad payload rather than raising — logging must not be able to kill a run.
 
-**Next task:** 2.3 — the control loop in `harness/loop.py`: routing, retry with evidence, the livelock check, the retry cap, escalation. Still zero API calls.
+**Next task:** 2.4 — `tests/test_loop.py`. Still zero API calls. The loop is written and reviewed; nothing in the suite exercises it.
 
-What 2.3 owes, with the pieces now in place to test each:
+What 2.4 owes. Every input needed for these now exists:
 
-- Branch on `summary_parsed=False` to **escalate, not retry** — `broken_edits()` is the input that reaches it.
-- Livelock check **immediately after the Implementer, before Review**. The assertion that proves the ordering is that the Reviewer stub was never called a second time.
-- Append to `previous_diffs` **after** the livelock check passes, not before. Appending first leaves the duplicate in the list and puts every count off by one: at a livelock halt `previous_diffs` holds one entry and `attempt_count` is 2.
-- The human-approval gate as an injectable callback — the one allowed seam. Loop tests drive it with `True`, `False` (→ `aborted_by_human`), and scripted sequences.
-- The retry-cap test needs **five distinct** failing variants; identical ones would trip the livelock check first and never reach the cap.
+- **Happy path** → `succeeded`, `attempt_count == 1`.
+- **Fail then fix** → `succeeded` at 2, with `implementer.seen[1]["evidence"]` a `TesterFailure` carrying the real nodeid. Seeing a second attempt happen is not the assertion; seeing the failure carried into it is.
+- **Livelock** — `failing_edits(1)` twice → `escalated_livelock`, `attempt_count == 2`, one entry in `previous_diffs`, and `len(reviewer.seen) == 1`. That last one is what proves the check runs before Review.
+- **Retry cap** — five **distinct** failing variants → `escalated_retry_limit` at 5. Identical ones would trip livelock first and never reach the cap.
+- **Human rejection** → `aborted_by_human` at 1, `test_result is None`, and the fixture's bug still on disk in the run directory. Assert the last one: it is invariant 1 end to end.
+- **Review rejection** → routes back with a `ReviewerRejection`, and `len(approver.seen) == 1` proves the gate was never offered a rejected diff.
+- **Scope violation** — `out_of_scope_edits()` → routes back, `violated_constraints == ["pricing/money.py"]`, `reviewer.seen` empty, `previous_diffs` untouched.
+- **Broken suite** — `broken_edits()` → `escalated_broken_suite` at 1.
+- **A backslash path is not a scope violation** — `pricing\discounts.py` against a plan targeting `pricing/discounts.py` must succeed.
+- **The event log** — `run_finished` appears exactly once; `baseline_reset` opens every attempt; Planner events carry `attempt=0`.
+
+Two things to know before writing assertions. `evidence` **survives** into a successful terminal state, so a fail-then-fix run ends `succeeded` with the corrected failure still in `evidence`. And every scenario costs a `copytree` plus a real pytest subprocess per attempt — the retry-cap one costs five of each — so this will be the slowest module in the suite by some margin.
 
 **Open questions:** none
+
+Known gaps, not questions: `cli.py` is still empty, so nothing yet builds a `TaskState` from `task.json`, generates the `task_id`, calls `prepare_run_dir`, or supplies a real terminal approval callback. That is the wiring 2.5 or Phase 3 owes; `run_task` is written to be driven by it and is not driven by anything today.

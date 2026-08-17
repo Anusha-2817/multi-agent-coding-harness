@@ -133,3 +133,31 @@ class StubReviewer(_ScriptedAgent):
 
     def _run(self, *, plan: Plan, diff: str) -> ReviewVerdict:
         return self._scripted(plan=plan, diff=diff)
+
+
+class StubApprover:
+    """A scripted human at the approval gate.
+
+    Not an `Agent`: the gate is a callback, not a role. It has no contract, reads
+    no state, and writes no field -- the loop hands it a diff and gets a `bool`.
+    So this shares `Script` with the agent stubs and nothing else.
+
+    It exists because the gate is the one genuine seam in v1. A human at a
+    terminal is otherwise untestable, and the gate is on the critical path of
+    every attempt: without a double here, no loop test can reach the apply step
+    at all, and `aborted_by_human` is unreachable.
+
+    `seen` records the diffs it was shown, which is how a test proves invariant 1
+    the whole way through -- that the bytes the human approved are the bytes the
+    Reviewer saw and the bytes that reached disk, not merely that some approval
+    happened somewhere.
+    """
+
+    def __init__(self, answers: Sequence[bool]) -> None:
+        self.script = Script("approver", answers)
+        #: One entry per call, holding the diff the gate was shown.
+        self.seen: list[str] = []
+
+    def __call__(self, diff: str) -> bool:
+        self.seen.append(diff)
+        return self.script.next()

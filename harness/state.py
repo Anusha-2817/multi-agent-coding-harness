@@ -52,6 +52,12 @@ class Status(StrEnum):
     SUCCEEDED = "succeeded"
     ESCALATED_RETRY_LIMIT = "escalated_retry_limit"
     ESCALATED_LIVELOCK = "escalated_livelock"
+    # A suite that will not collect is not fixable by another diff: there is no
+    # failing test to aim at, so a retry would burn an attempt producing a change
+    # nobody can evaluate. Distinct from the other two escalations because the
+    # fault is neither the plan (livelock) nor exhaustion (retry limit) -- the
+    # Implementer emitted something that does not parse.
+    ESCALATED_BROKEN_SUITE = "escalated_broken_suite"
     ABORTED_BY_HUMAN = "aborted_by_human"
 
 
