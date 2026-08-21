@@ -36,16 +36,18 @@ If a task seems to need one of these, stop and ask rather than building it.
 
 ### The one dependency, and where it stops
 
-Phase 3 adds `anthropic` to `requirements.txt`. That is not a hole in the fence, and the reasoning matters more than the outcome.
+Phase 3 adds `google-genai` to `requirements.txt`. That is not a hole in the fence, and the reasoning matters more than the outcome.
 
-The fence bans **agent frameworks** — LangGraph, LangChain, CrewAI — because they would build the control loop, and the control loop is the entire project. A provider HTTP client builds nothing of the sort. Hand-rolling `urllib`, exponential backoff with jitter, and `retry-after` parsing would cost a session and demonstrate nothing about agentic systems: it is plumbing every project needs and no project should write twice.
+The fence bans **agent frameworks** — LangGraph, LangChain, CrewAI — because they would build the control loop, and the control loop is the entire project. A provider HTTP client builds nothing of the sort. Hand-rolling `urllib`, exponential backoff with jitter, and status-code retry classification would cost a session and demonstrate nothing about agentic systems: it is plumbing every project needs and no project should write twice.
 
 So the boundary is drawn at what the dependency would be *doing for us*:
 
-- **Delegated** — connection handling, HTTP retries with backoff, `retry-after`, typed error classes. `harness/llm.py` configures `max_retries` and `timeout` on the SDK client and lets it do that job.
+- **Delegated** — connection handling, HTTP retries with exponential backoff and jitter, typed error classes. `harness/llm.py` configures `retry_options` and `timeout` on the SDK client and lets it do that job.
 - **Hand-rolled, in `harness/llm.py`** — the three-step parse ladder from response text to a JSON value, the repair turn, and the failure taxonomy that decides which failures are worth retrying, which are worth repairing, and which are worth neither.
 
-That split is also why the client calls `messages.create` and not the SDK's `messages.parse`. `parse` would do the extraction and validation for us, and those two steps are exactly what this phase exists to understand. Choosing the harder call deliberately is what keeps this a principled boundary rather than a convenient exception.
+That split is also why the client asks for `response_json_schema` and parses the text itself rather than reading the SDK's `response.parsed`. `parsed` would do the extraction and validation for us, and those two steps are exactly what this phase exists to understand. Choosing the harder path deliberately is what keeps this a principled boundary rather than a convenient exception.
+
+**The provider moved once and the argument did not.** 3A was built on `anthropic`; 3A.1 swapped it for `google-genai` because the Anthropic API needs prepaid credits this project does not have and Gemini's free tier covers fixture-sized runs. Nothing above is a different claim than it was — see "The transport swap" for what it cost.
 
 **The four agents are parameters of `run_task`, and that is not a second seam.** They are the loop's operands, not a hidden pluggability point: `cli.py` chooses stubs or real ones from `--stub`, and the loop never learns which it got. A `stub: bool` flag would not work anyway — loop tests must hand in *specific scripts* (`failing_edits(1), failing_edits(2), fixing_edits()`), and a boolean cannot express those. The distinction that matters: `approve` is a seam because it stands in for a human, whereas the agents were always going to be passed in by someone.
 
@@ -60,7 +62,7 @@ Build order. Phases 1–2 make **zero API calls**.
 | 0 | Scaffold, CLAUDE.md, first commit | done |
 | 1 | `TaskState` + all models, `EventLog`, fixture repo 1, Tester, unit tests | done |
 | 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), the approval gate and apply step, scripted failure tests | in progress — 2.1, 2.2, 2.3 done |
-| 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | in progress — 3A done (client, Planner, Implementer, `cli.py`) |
+| 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | in progress — 3A done (client, Planner, Implementer, `cli.py`), 3A.1 done (Anthropic → Gemini) |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | |
 | 5 | Fixture repos 2–3, Reviewer-rejection scenario, saved transcripts, README update | |
 
@@ -547,7 +549,7 @@ Two rules shape the set. **Every halt goes through `_halt`**, so `run_finished` 
 
 `harness/llm.py`. One public method, `complete_structured(system=, user=, schema=, max_tokens=) -> LLMResult`: text in, validated Pydantic object out. Agents hold one as a constructor dependency, exactly as the Tester holds its `timeout`.
 
-`schema` must describe a JSON **object**, because that is what the API's structured outputs accepts at the root. `Plan` already is one. `list[FileEdit]` is not, so the Implementer wraps it in `ImplementerResponse {edits: [...]}` — an envelope that lives in `implementer.py` and not in `state.py`, because `state.py` is the typed contract *between agents* and this is the wire format of a single call, unwrapped before it reaches state. `_run` still returns `list[FileEdit]`, exactly as `CONTRACTS` says.
+`schema` must describe a JSON **object**, because that is what `response_json_schema` accepts at the root. `Plan` already is one. `list[FileEdit]` is not, so the Implementer wraps it in `ImplementerResponse {edits: [...]}` — an envelope that lives in `implementer.py` and not in `state.py`, because `state.py` is the typed contract *between agents* and this is the wire format of a single call, unwrapped before it reaches state. `_run` still returns `list[FileEdit]`, exactly as `CONTRACTS` says.
 
 ### The client reports; the agent logs
 
@@ -567,20 +569,64 @@ Four outcomes, three responses. The distinctions exist because each one sends yo
 
 | Failure | Response |
 | ------- | -------- |
-| Retryable HTTP (429, 5xx, connection) | SDK retries with backoff; `LLMTransportError(retryable=True)` if it still fails |
-| Non-retryable HTTP (400, 401, 404, …) | `LLMTransportError(retryable=False)` immediately — the same bytes fail identically |
+| Retryable HTTP (408, 429, 5xx, connection) | SDK retries with backoff; `LLMTransportError(retryable=True)` if it still fails |
+| Non-retryable HTTP (400, 401, 403, 404, …) | `LLMTransportError(retryable=False)` immediately — the same bytes fail identically |
+| A 429 naming a **per-day** quota | `LLMTransportError(retryable=False)` — see below |
 | Malformed JSON, or JSON that fails validation | One repair turn, then `LLMResponseError` |
-| `stop_reason` of `max_tokens` or `refusal` | Raise at once — **never repaired** |
+| `finish_reason` of `MAX_TOKENS` | Raise at once — **never repaired** |
+| `finish_reason` in the safety family, or a blocked prompt | Raise at once — **never repaired** |
 
-That last row is the one worth stating. A truncated response would truncate at the same place on the retry, so the fix is a larger `max_tokens` — a config change, not a runtime recovery — and a refusal repeats. Both raise from `_text_of`, which sits *outside* the try that triggers the repair; the placement is the mechanism, not a comment.
+The last two rows are the ones worth stating. A truncated response would truncate at the same place on the retry, so the fix is a larger `max_tokens` — a config change, not a runtime recovery — and a block repeats. Both raise from `_text_of`, which sits *outside* the try that triggers the repair; the placement is the mechanism, not a comment.
 
-`extra="forbid"` on every model in `state.py` was chosen for the harness's own reasons and turns out to be exactly what structured outputs requires (`additionalProperties: false`). It also makes an unexpected key a hard validation failure — correct, since an extra key means the model misunderstood its contract, and common enough that the repair turn handles a routine model habit rather than an edge case. Pydantic's `ValidationError` names the offending field, and `describe_problems` hands that straight back to the model.
+**Truncation is likelier on Gemini than the name suggests.** Thinking is on by default on the 2.5 family and thinking tokens come out of `max_output_tokens`, so a budget that is merely tight is spent thinking and returns `MAX_TOKENS` with *no text at all*. `LLMTruncatedError` says so, because "the model returned nothing" and "raise the budget" are otherwise a long way apart.
+
+**Blocking happens at both ends.** A `finish_reason` in `REFUSAL_FINISH_REASONS` (`SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, and the image variants) means the output was blocked after generation; a `prompt_feedback.block_reason` means the input was blocked before it, leaving no candidate at all. Anthropic had no equivalent of the second. Both are `LLMRefusalError`. A finish reason *not* on the list — `OTHER`, `LANGUAGE` — deliberately takes the normal path: the rule is "reasons that recur identically raise", and those are unknown rather than known-permanent.
+
+**The per-day 429 is a real distinction, made by a brittle means.** A rate-limit 429 and an exhausted daily quota both arrive as `RESOURCE_EXHAUSTED` with code 429; the only thing separating "wait thirty seconds" from "wait until tomorrow" is the quota id inside the message. `_is_daily_quota` sniffs for it. That is brittle, so it is scoped to change *nothing but the error message*: the SDK has finished retrying by the time this runs, so `retryable` here is a label for a human, not a control-flow input. If the marker strings rot, the message gets less specific and nothing else breaks.
+
+`extra="forbid"` on every model in `state.py` was chosen for the harness's own reasons and survives the provider swap intact: `additionalProperties` is on Gemini's supported-keyword list for `response_json_schema`, so Pydantic's `model_json_schema()` goes over the wire **unmodified** — no transform, no silently-dropped constraint. That matters because it is what keeps an unexpected key a hard validation failure — correct, since an extra key means the model misunderstood its contract, and common enough that the repair turn handles a routine model habit rather than an edge case. Pydantic's `ValidationError` names the offending field, and `describe_problems` hands that straight back to the model.
 
 ### LLMResponseError is fatal, for now
 
 It propagates out of `_run`, out of `run_task`, and ends the run in a stack trace rather than a `Status` — like `AgentContractError`. A model that cannot emit its own schema twice is neither a task outcome (no diff was produced to judge) nor recoverable by another attempt.
 
 A seventh `Status` is **deliberately deferred to Phase 4**, which owns escalation output. `escalated_broken_suite` earned its place because the other two escalations would have been lies about a condition the loop reaches on a normal path; this one is rare, and a stack trace naming the raw text is more useful than a status value. Adding one now would be justified by a guess about frequency.
+
+### The transport swap
+
+3A.1 replaced `anthropic` with `google-genai`. **It touched one source file.**
+
+`harness/llm.py` changed in five places — `_create`, `_text_of`, `_metadata_of`, the error classification, and the constants naming the model and the finish reasons. `tests/test_llm.py` changed its doubles. `requirements.txt` and this file changed. **Nothing else in the repo moved**: not `planner.py` or `implementer.py`, not their prompts, not the agents, not `loop.py`, not `cli.py`, not `state.py`, and not one of the other eight test modules. The 275 tests outside `test_llm.py` passed untouched, which is the actual evidence that the seam was in the right place — not the claim, the run.
+
+Three things did the work:
+
+- **`complete_structured` speaks a neutral message shape.** It builds `{"role": "user"|"assistant", "content": str}` and `_create` translates — Gemini spells the assistant role `model`, and that fact stops at one function, `_as_content`.
+- **`LLMResult` is the harness's vocabulary, not the provider's.** `stop_reason` still means "why the model stopped" even though Gemini reports it on the candidate and calls it `finish_reason`; `usage` keeps the key names it had, so a log written before the swap still lines up with one written after. `_metadata_of` does that renaming, and it lives down with `_create` because every field it reads is spelled by the provider.
+- **The failure taxonomy is about *kinds* of failure, not status codes.** "Truncated", "blocked", "malformed", "unreachable" are provider-independent categories; only their spellings moved.
+
+The one honest caveat: `complete_structured` gained a single line — `**self._metadata_of(envelope)` in place of three inline `getattr`s. Leaving those alone would have been more faithful to the letter of "nothing above `_create` changes", and would have silently returned `stop_reason=None` and `usage={}` on every call, gutting the logging 3A added. A seam that survives only by breaking what it feeds is not a seam that held.
+
+### Free-tier limits are the real constraint
+
+Gemini's free tier is what makes this project runnable without prepaid credits, and its **daily** cap — not its per-minute one — is what limits a debugging session.
+
+**Google no longer publishes a static free-tier table.** The rate-limits page defers to a per-account dashboard, so the numbers are yours to read rather than ours to quote: <https://aistudio.google.com/rate-limit>. What is stable is the shape — free tier is capped on requests per minute, tokens per minute, and **requests per day**, with RPD in the tens-to-low-hundreds depending on model, and `gemini-2.5-flash` more generous than `gemini-2.5-pro`.
+
+What matters more than the number is the arithmetic against it, and that is exact:
+
+| Run | API calls |
+| --- | --------- |
+| Happy path (plan, one attempt, green) | **2** |
+| One retry, then green | 3 |
+| Five attempts to the cap | **6** |
+| Any of the above, per parse repair | +1 each |
+
+One Planner call plus one Implementer call per attempt. The real Reviewer in 3B adds one per attempt that reaches review, roughly doubling a failing run. So a day's RPD divided by ~6 is the honest ceiling on debugging runs, and a run that dies on a `MAX_TOKENS` at attempt four has still spent five calls.
+
+Two consequences worth designing around:
+
+- **A daily-quota 429 is not a transient failure.** The SDK will retry it three times with backoff and fail anyway. `_is_daily_quota` exists so the resulting error says "tomorrow" rather than "shortly" — see the failure taxonomy above.
+- **The parse repair costs a whole request.** That is a second reason, beyond token cost, to keep `max_parse_retries` at 1: on a metered daily allowance, a second repair would trade a real debugging run for a model that already failed twice.
 
 ### Reading the repo for a prompt
 
@@ -593,7 +639,7 @@ A seventh `Status` is **deliberately deferred to Phase 4**, which owns escalatio
 ## Retry vs. backoff — do not conflate
 
 - **Agent retries** (Reviewer rejection, Tester failure) → route back to Implementer with evidence. No delay. The model is stateless; waiting changes nothing about the next output.
-- **HTTP retries** (429, 5xx) → live in the LLM client wrapper, with exponential backoff. Never in the agent loop.
+- **HTTP retries** (408, 429, 5xx) → live in the LLM client wrapper, with exponential backoff and jitter. Never in the agent loop. `google-genai` retries **nothing** unless `http_options.retry_options` is set, so this is opt-in rather than a default being accepted — one layer, deliberately configured, not two layers fighting.
 - **Parse repairs** (malformed JSON, failed validation) → also in the LLM client wrapper, added in 3A. One bounded retry that hands the model its own validation error back. **No delay**, unlike the HTTP backoff one layer down: that exists because the *server* needs time to recover, and a model holds nothing that waiting would improve. It is not a resend either — the repair turn is a different, better-informed request carrying an error message the first one could not have had.
 
 A parse failure must not become an agent retry. The loop's `evidence` says *the diff was wrong*; a model that emitted prose instead of JSON produced no diff at all, so there is nothing for `ReviewerRejection` or `TesterFailure` to describe and nothing for `attempt_count` — whose whole meaning is "how many diffs has this task produced" — to count. This is also why the scope check's precedent does not apply: that reuses `ReviewerRejection` because the corrective action is identical, and here it isn't.
@@ -605,8 +651,8 @@ A parse failure must not become an agent retry. The loop's `evidence` says *the 
 | Part           | Choice                                                            |
 | -------------- | ----------------------------------------------------------------- |
 | Language       | Python 3.14, no agent framework                                   |
-| LLM transport  | official `anthropic` SDK — see "The one dependency, and where it stops" |
-| LLM model      | `claude-opus-5`, structured outputs, adaptive thinking (default)  |
+| LLM transport  | official `google-genai` SDK — see "The one dependency, and where it stops" |
+| LLM model      | `gemini-2.5-flash`, `response_json_schema`, dynamic thinking (default) |
 | State          | Pydantic v2                                                       |
 | Diff rendering | `difflib.unified_diff` over `edits` + baseline                    |
 | Test execution | `subprocess` running `pytest`                                     |
@@ -669,12 +715,16 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 3 — in progress. 3A done: the LLM client, the real Planner, the real Implementer, and `cli.py`.
-**Last completed:** 3A. Suite is **346 tests, all passing, about 170s.**
+**Phase:** 3 — in progress. 3A done: the LLM client, the real Planner, the real Implementer, and `cli.py`. 3A.1 done: the provider swap.
+**Last completed:** 3A.1 — Anthropic → Gemini, a transport-only change. Suite is **363 tests, all passing, about 170s.**
 
-`harness/llm.py` (`LLMClient`, `LLMResult`, `extract_json`, `describe_problems`, `repair_prompt`, and the error hierarchy), `harness/agents/planner.py`, `harness/agents/implementer.py`, `cli.py`, plus `workspace.list_repo_files` / `read_repo_file` and a `target_files` validator on `Plan`. `anthropic==1.0.0` is now in `requirements.txt` — see "The one dependency, and where it stops".
+**3A.1.** `google-genai==2.19.0` replaces `anthropic` in `requirements.txt`; the key comes from `GEMINI_API_KEY` and the model is `gemini-2.5-flash`. The Anthropic API needs prepaid credits this project does not have. **One source file changed** — see "The transport swap" for what moved inside `harness/llm.py` and what did not move anywhere else, and "Free-tier limits are the real constraint" for the daily-quota arithmetic that now caps how many debugging runs a day holds.
 
-Three new test modules, none of which touch the network: `tests/test_llm.py` (54), `tests/test_prompts.py` (48), `tests/test_cli.py` (20).
+**3A.** `harness/llm.py` (`LLMClient`, `LLMResult`, `extract_json`, `describe_problems`, `repair_prompt`, and the error hierarchy), `harness/agents/planner.py`, `harness/agents/implementer.py`, `cli.py`, plus `workspace.list_repo_files` / `read_repo_file` and a `target_files` validator on `Plan`.
+
+Three test modules, none of which touch the network: `tests/test_llm.py` (71), `tests/test_prompts.py` (48), `tests/test_cli.py` (20).
+
+`tests/test_llm.py`'s `client` fixture is **module-scoped**, for the reason `test_loop.py` shares its scenarios: a `genai.Client` costs about a second to construct (it sets up a trust store), and function scope made that module take a minute instead of five seconds. Safe because every test that issues a request replaces `_sdk` outright; a test needing different client *settings* builds its own.
 
 **Every decision from the 3A design pass is argued in full above** — the dependency boundary, `repo_path` in two more contracts, the parse ladder, the repair turn, the failure taxonomy, `LLMResponseError` staying fatal, the `Plan` validator, the entrypoint's shape, and why there is no `--stub` flag yet.
 
@@ -683,6 +733,8 @@ Two things worth knowing before touching this next:
 **The Implementer retries blind to its own last attempt.** Its contract is `plan` + `evidence`; `diff` belongs to the Reviewer and the gate, `previous_diffs` to the harness. This is fine for a scope violation (the offending paths are in `violated_constraints`) and largely fine for a test failure (the traceback describes how the code actually behaved). The thin case is a *judged* rejection — "this overreaches the plan" is hard to act on without seeing what you wrote. Left as-is deliberately; Phase 5 builds the fixture that exercises the Reviewer's judgment, and that is when it can be measured rather than guessed at.
 
 **`loop.py`'s reason strings are now prompt text.** `"the Implementer produced no edits"` and `"edited N file(s) outside the plan's target_files: ..."` are read by a model, not just by a human. `render_evidence` quotes them under a `Reason given:` heading rather than inlining them into a sentence, which is why they still read correctly in the second person without needing to be rewritten. Anyone editing those strings is editing a prompt.
+
+**One stale string, left deliberately.** `tests/test_prompts.py`'s `FakeClient` returns `LLMResult(model="claude-opus-5", ...)`. It is an invented value in a double that no assertion reads, so it is inert — but it is the last "claude" in the repo outside `llm.py`'s historical docstrings, and 3A.1's scope was llm.py, its tests, `requirements.txt`, and this file. Change it whenever `test_prompts.py` is next touched for a real reason.
 
 **Livelock gets rarer from here.** The check is defined over byte-identical rendered diffs, and a real model sampling twice rarely produces them. That does not make the check wrong — it is still the right test for the condition it names — but do not expect real runs to trip it the way `test_loop.py` does.
 

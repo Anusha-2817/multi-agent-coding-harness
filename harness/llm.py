@@ -1,10 +1,10 @@
 """The LLM client wrapper: one text-in, validated-object-out call.
 
-**The split this module draws, and why.** Transport is the official `anthropic`
-SDK: connection pooling, HTTP retries with exponential backoff, `retry-after`
-parsing, and typed error classes. Hand-rolling that over `urllib` would cost a
-session and demonstrate nothing about agentic systems -- it is plumbing every
-project needs and no project should write twice.
+**The split this module draws, and why.** Transport is the official `google-genai`
+SDK: connection handling, HTTP retries with exponential backoff and jitter, and
+typed error classes. Hand-rolling that over `urllib` would cost a session and
+demonstrate nothing about agentic systems -- it is plumbing every project needs
+and no project should write twice.
 
 The scope fence bans **agent frameworks** -- LangGraph, LangChain, CrewAI --
 because they would build the control loop, which is the whole point of this
@@ -21,17 +21,25 @@ So the interesting half stays hand-rolled, right here:
 - **The failure taxonomy** -- which failures are worth retrying, which are worth
   repairing, and which are worth neither.
 
-That is also why this calls `messages.create` and not the SDK's `messages.parse`.
-`parse` would do the extraction and validation for us, and those are exactly the
+That is also why this asks for `response_json_schema` and then parses the text
+itself, rather than reading the SDK's `response.parsed` convenience field.
+`parsed` would do the extraction and validation for us, and those are exactly the
 two steps this phase exists to understand.
+
+**The provider sits behind `_create` and `_text_of`.** Those two methods and the
+constants above them are the entire surface that knows which API this is. The
+swap from Anthropic to Gemini in 3A.1 changed nothing else in this file, and
+nothing at all outside it -- see CLAUDE.md, "The transport swap".
 
 **Where retries live.** CLAUDE.md's "Retry vs. backoff" split holds, with a third
 case added by this module:
 
 - *Agent retries* (Reviewer rejection, Tester failure) -- the control loop's job.
   A bad diff. Never here.
-- *HTTP retries* (429, 5xx, connection errors) -- the SDK's job, configured here
-  via `max_retries`. Exponential backoff, because the server needs time.
+- *HTTP retries* (408, 429, 5xx, connection errors) -- the SDK's job, but only
+  because this module asks for it: `google-genai` does **no** retrying unless
+  `http_options.retry_options` is set, so `_RETRY_OPTIONS` below is what turns it
+  on. Exponential backoff with jitter, because the server needs time.
 - *Parse repairs* (malformed JSON, failed validation) -- this module's job. The
   model returned text that is not the object we asked for. It never touches
   `attempt_count`: no diff was produced, so nothing happened that the loop's
@@ -46,18 +54,26 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-import anthropic
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 from pydantic import BaseModel, ValidationError
 
-# Thinking is on by default on this model and `max_tokens` caps thinking *plus*
-# response text, which is why callers pass generous budgets.
-DEFAULT_MODEL = "claude-opus-5"
+# Free tier available, and the best quality-per-quota of the models that have
+# one -- see CLAUDE.md, "Free-tier limits are the real constraint". Swap to
+# `gemini-2.5-pro` for a harder fixture and a much tighter daily quota.
+#
+# Thinking is on by default on the 2.5 family with a dynamic budget, and thinking
+# tokens are drawn from `max_output_tokens`. That is why callers pass generous
+# budgets: too small a budget is spent thinking and returns a `MAX_TOKENS` finish
+# with no text at all.
+DEFAULT_MODEL = "gemini-2.5-flash"
 
 # HTTP attempts beyond the first, handled inside the SDK with backoff.
 DEFAULT_MAX_RETRIES = 3
 
-# Per HTTP attempt, not per call. Worst case is roughly
-# `timeout * (max_retries + 1)` plus the SDK's own backoff sleeps.
+# Per HTTP attempt, not per call, and in **seconds** -- this module's own unit.
+# `HttpOptions.timeout` is milliseconds, converted at the boundary in `__init__`.
 DEFAULT_TIMEOUT = 120.0
 
 # Parse attempts beyond the first. One repair turn, then give up -- a model that
@@ -65,11 +81,40 @@ DEFAULT_TIMEOUT = 120.0
 # each round trip costs the full prompt again.
 DEFAULT_MAX_PARSE_RETRIES = 1
 
-# What the SDK retries on our behalf. Duplicated here for one purpose: telling a
-# caller whether the failure they are holding was already retried three times
-# (network or capacity -- try later) or was returned immediately (the request
-# itself is wrong -- fix it). Those send you to completely different files.
-RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+# What the SDK retries on our behalf, once `_RETRY_OPTIONS` has switched retrying
+# on. Restated here for one purpose: telling a caller whether the failure they
+# are holding was already retried three times (network or capacity -- try later)
+# or was returned immediately (the request itself is wrong -- fix it). Those send
+# you to completely different files.
+RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
+# Gemini finish reasons that mean the model stopped for a reason no amount of
+# asking again will change. Grouped as one set because the response is identical
+# for all of them: raise, do not repair.
+REFUSAL_FINISH_REASONS = frozenset(
+    {
+        "SAFETY",
+        "RECITATION",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "IMAGE_PROHIBITED_CONTENT",
+        "IMAGE_RECITATION",
+    }
+)
+
+# The one finish reason that means "there was more to say and no room to say it".
+TRUNCATED_FINISH_REASON = "MAX_TOKENS"
+
+# A 429 is retryable when it is a per-minute rate limit and effectively is not
+# when the daily quota is gone. Both arrive as `RESOURCE_EXHAUSTED`, so the only
+# thing separating them is the quota id in the message. Sniffing a message is
+# brittle and this deliberately does not change any behaviour -- the SDK has
+# already finished retrying by the time we classify -- it only changes whether
+# the error says "try again shortly" or "you are done for the day", which is the
+# difference between waiting thirty seconds and waiting until tomorrow.
+_DAILY_QUOTA_MARKERS = ("perday", "per day", "requests per day", "daily limit")
 
 # ```json ... ``` or ``` ... ```, the wrapper a model reaches for when it decides
 # to be helpful. Non-greedy so several fenced blocks stay separate.
@@ -121,7 +166,7 @@ class LLMResponseError(LLMError):
 
 
 class LLMTruncatedError(LLMResponseError):
-    """The response hit `max_tokens` mid-object.
+    """The response ran out of output budget mid-object (`MAX_TOKENS`).
 
     Deliberately not repaired. The repair turn would run into the same ceiling at
     the same place and burn a second full-prompt round trip to produce the same
@@ -129,13 +174,24 @@ class LLMTruncatedError(LLMResponseError):
     not a runtime recovery -- and distinguishing it from ordinary malformed JSON
     is the difference between an error that tells you what to do and one that
     sends you hunting.
+
+    On Gemini this fires more readily than the name suggests, because thinking is
+    on by default and thinking tokens come out of the same budget. A `MAX_TOKENS`
+    finish with *no* text at all usually means the whole budget went on thinking,
+    and the fix is the same one: raise `max_tokens`.
     """
 
 
 class LLMRefusalError(LLMResponseError):
-    """The model declined. Content is empty or partial; there is nothing to parse.
+    """The model declined, or its output was blocked. Nothing to parse.
 
-    Also not repaired: rephrasing a refusal is not this module's business, and a
+    Covers both ends of the request on Gemini: a `finish_reason` in
+    `REFUSAL_FINISH_REASONS` (the output was blocked after generation) and a
+    `prompt_feedback.block_reason` (the input was blocked before it, so there is
+    no candidate at all). Anthropic had no equivalent of the second case; both
+    mean the same thing here.
+
+    Not repaired: rephrasing a refusal is not this module's business, and a
     repair turn would only ask a model that just declined to decline again.
     """
 
@@ -298,19 +354,30 @@ class LLMClient:
         timeout: float = DEFAULT_TIMEOUT,
         max_parse_retries: int = DEFAULT_MAX_PARSE_RETRIES,
     ) -> None:
-        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        key = api_key or os.environ.get("GEMINI_API_KEY")
         if not key:
             raise LLMError(
-                "no API key: pass api_key= or set ANTHROPIC_API_KEY. "
+                "no API key: pass api_key= or set GEMINI_API_KEY. "
                 "Phases 1-2 make zero API calls; only Phase 3 needs this."
             )
 
         self.model = model
         self.max_parse_retries = max_parse_retries
-        # `max_retries` and `timeout` on the SDK client are the HTTP half of
-        # CLAUDE.md's retry/backoff split -- 408/409/429/5xx and connection
-        # errors, with exponential backoff and `retry-after` honoured.
-        self._sdk = anthropic.Anthropic(api_key=key, max_retries=max_retries, timeout=timeout)
+        # This is the HTTP half of CLAUDE.md's retry/backoff split, and on this
+        # SDK it is opt-in: `google-genai` retries nothing unless `retry_options`
+        # is set. `attempts` counts the original request, so +1 keeps
+        # `max_retries` meaning "attempts beyond the first", as it did before.
+        #
+        # `timeout` is milliseconds here and seconds in this module's signature.
+        # Converting at the boundary keeps the public signature the unit a caller
+        # would expect, and keeps the SDK's unit from leaking upward.
+        self._sdk = genai.Client(
+            api_key=key,
+            http_options=genai_types.HttpOptions(
+                timeout=int(timeout * 1000),
+                retry_options=genai_types.HttpRetryOptions(attempts=max_retries + 1),
+            ),
+        )
 
     def complete_structured(
         self,
@@ -354,12 +421,14 @@ class LLMClient:
                 ]
                 continue
 
+            # The one line in this method that knows anything about the provider,
+            # and it knows it only by delegating: reading a served model name, a
+            # stop reason and a token count out of a response envelope is
+            # transport work, and the shape of all three moved with the SDK.
             return LLMResult(
                 value=value,
-                model=getattr(envelope, "model", self.model),
-                stop_reason=getattr(envelope, "stop_reason", None),
                 parse_attempts=parse_attempt,
-                usage=_usage_of(getattr(envelope, "usage", None)),
+                **self._metadata_of(envelope),
             )
 
         # Unreachable: the loop either returns or raises on its last pass.
@@ -377,56 +446,115 @@ class LLMClient:
     ) -> Any:
         """One API call, with SDK exceptions mapped onto this module's two.
 
-        `thinking` is left unset: it is adaptive by default on this model, and
-        naming it would only be a chance to name it wrong. `temperature` and its
-        relatives are not sent at all -- they are rejected outright on this
-        model, and prompting is the steering mechanism here anyway.
+        The provider-neutral `messages` this receives -- `role` of `user` or
+        `assistant`, a `content` string -- are translated to Gemini's shape here
+        and nowhere else. That is what let `complete_structured` survive the
+        provider swap without a character changing: the repair turn still appends
+        an `assistant` turn, and this method knows that Gemini spells it `model`.
+
+        `response_json_schema` takes Pydantic's `model_json_schema()` **as-is**.
+        No transform is needed: every keyword Pydantic emits for these models
+        (`type`, `properties`, `required`, `items`, `$defs`, `$ref`, `title`,
+        `description`, `additionalProperties`) is on Gemini's supported list.
+        `additionalProperties` in particular survives, which is what keeps
+        `extra="forbid"` load-bearing for the repair path -- an unexpected key
+        still fails validation and still gets named back to the model.
+
+        `thinking_config` is left unset: it is dynamic by default on the 2.5
+        family, and naming it would only be a chance to name it wrong.
+        `temperature` and its relatives are not sent at all -- prompting is the
+        steering mechanism here, and a sampling knob would be one more thing to
+        keep aligned across two agents.
         """
         try:
-            return self._sdk.messages.create(
+            return self._sdk.models.generate_content(
                 model=self.model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=messages,
-                output_config={"format": {"type": "json_schema", "schema": json_schema}},
+                contents=[_as_content(message) for message in messages],
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=system,
+                    max_output_tokens=max_tokens,
+                    response_mime_type="application/json",
+                    response_json_schema=json_schema,
+                ),
             )
-        except anthropic.APIStatusError as exc:
+        except genai_errors.APIError as exc:
             raise _transport_error(exc) from exc
-        except anthropic.APIConnectionError as exc:
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            # `google-genai` lets transport failures through as httpx/socket
+            # errors rather than wrapping them, so the catch is on the stdlib
+            # bases those inherit from rather than on an SDK class that does not
+            # exist.
             raise LLMTransportError(
                 f"could not reach the API after retries: {type(exc).__name__}: {exc}",
                 status_code=None,
                 retryable=True,
             ) from exc
 
+    def _metadata_of(self, envelope: Any) -> dict[str, Any]:
+        """What `LLMResult` records about the call, read out of the envelope.
+
+        Sits down here with `_create` and `_text_of` because every field it
+        reads is spelled by the provider: Gemini says `model_version` where
+        Anthropic said `model`, reports the finish reason on the candidate
+        rather than the message, and calls the token counts `usage_metadata`.
+
+        `LLMResult`'s own field names do not change, which is the point --
+        `stop_reason` still means "why the model stopped", and an event log from
+        before the swap still lines up with one from after.
+        """
+        candidate = _first_candidate(envelope)
+        return {
+            "model": getattr(envelope, "model_version", None) or self.model,
+            "stop_reason": _finish_reason_of(candidate),
+            "usage": _usage_of(getattr(envelope, "usage_metadata", None)),
+        }
+
     def _text_of(self, envelope: Any) -> str:
         """The model's text, or an exception explaining why there is none.
 
-        `stop_reason` is checked before the content, because a refusal can arrive
-        with an empty `content` list and indexing it would report a shape problem
-        instead of the real one.
+        Three checks before the text, in the order the response can fail:
 
-        The text is then *searched for*, not indexed at position zero: thinking is
-        on by default on this model, so `content[0]` is a thinking block whose
-        text is empty under the default display setting. `content[0].text` is the
-        single easiest way to write a client that appears to receive nothing.
+        1. **The prompt was blocked** -- `prompt_feedback.block_reason`. There is
+           no candidate at all, so anything that reached for one would report a
+           shape problem instead of the real one.
+        2. **The output was blocked** -- a `finish_reason` in
+           `REFUSAL_FINISH_REASONS`.
+        3. **The output ran out of room** -- `MAX_TOKENS`.
+
+        Only then is the text assembled, and it is assembled by *walking the
+        parts*, not by indexing the first one. Thinking is on by default on this
+        model and thinking arrives as parts flagged `thought=True`; `parts[0]` is
+        the single easiest way to write a client that appears to receive nothing.
+        The SDK's `response.text` convenience property is skipped for the same
+        reason it was skipped on the previous provider -- it hides exactly the
+        distinction these three checks are drawing.
         """
-        stop_reason = getattr(envelope, "stop_reason", None)
-        blocks = list(getattr(envelope, "content", None) or [])
-        partial = _first_text(blocks)
-
-        if stop_reason == "refusal":
+        blocked = _prompt_block_reason(envelope)
+        if blocked:
             raise LLMRefusalError(
-                "the model declined the request",
+                f"the prompt was blocked before generation ({blocked})",
+                stage="refusal",
+                raw_text="",
+                problems="- your request was blocked and produced no response",
+            )
+
+        candidate = _first_candidate(envelope)
+        finish_reason = _finish_reason_of(candidate)
+        partial = _text_from_parts(candidate)
+
+        if finish_reason in REFUSAL_FINISH_REASONS:
+            raise LLMRefusalError(
+                f"the model stopped with {finish_reason}, which no retry changes",
                 stage="refusal",
                 raw_text=partial,
                 problems="- the model declined to answer",
             )
 
-        if stop_reason == "max_tokens":
+        if finish_reason == TRUNCATED_FINISH_REASON:
             raise LLMTruncatedError(
-                "the response hit max_tokens and is truncated; raise max_tokens "
-                "rather than retrying, since the retry truncates identically",
+                "the response hit max_output_tokens and is truncated; raise "
+                "max_tokens rather than retrying, since the retry truncates "
+                "identically. With no text at all, the budget went on thinking",
                 stage="truncated",
                 raw_text=partial,
                 problems="- the response was cut off before it was complete",
@@ -434,8 +562,8 @@ class LLMClient:
 
         if not partial:
             raise LLMResponseError(
-                f"the response carried no text block (stop_reason={stop_reason!r}, "
-                f"{len(blocks)} block(s))",
+                f"the response carried no text part (finish_reason="
+                f"{finish_reason!r})",
                 stage="empty",
                 raw_text="",
                 problems="- your response contained no text",
@@ -461,47 +589,130 @@ def _validate(text: str, schema: type[BaseModel]) -> BaseModel:
         ) from exc
 
 
-def _transport_error(exc: anthropic.APIStatusError) -> LLMTransportError:
-    """Classify a status error so the message says where to go looking."""
-    status = getattr(exc, "status_code", None)
+def _as_content(message: dict[str, Any]) -> genai_types.Content:
+    """One provider-neutral message dict as a Gemini `Content`.
+
+    The whole of the role translation lives here. `complete_structured` speaks
+    `user` and `assistant` because that is what it spoke before the swap; Gemini
+    spells the second one `model`, and the difference stops at this function.
+    """
+    role = "model" if message["role"] == "assistant" else "user"
+    return genai_types.Content(
+        role=role,
+        parts=[genai_types.Part.from_text(text=message["content"])],
+    )
+
+
+def _transport_error(exc: genai_errors.APIError) -> LLMTransportError:
+    """Classify a status error so the message says where to go looking.
+
+    `APIError.code` is the HTTP status; `.status` is Google's string code
+    (`RESOURCE_EXHAUSTED`, `INVALID_ARGUMENT`, ...). Both go in the message,
+    because the string is often the more useful half.
+    """
+    status = getattr(exc, "code", None)
+    label = getattr(exc, "status", None)
     retryable = status in RETRYABLE_STATUS
 
-    if retryable:
+    if retryable and _is_daily_quota(exc):
+        # See `_DAILY_QUOTA_MARKERS`: still a 429, still already retried, but
+        # calling it retryable would tell the reader to wait thirty seconds for
+        # something that resets tomorrow.
+        retryable = False
         detail = (
-            f"HTTP {status} after the client's retries were exhausted; "
+            f"HTTP {status} ({label}) and the message names a per-day quota, so "
+            f"retrying will not help until the daily allowance resets"
+        )
+    elif retryable:
+        detail = (
+            f"HTTP {status} ({label}) after the client's retries were exhausted; "
             f"the API is unavailable rather than the request being wrong"
         )
     else:
         detail = (
-            f"HTTP {status}, which is not retryable -- the request itself is the "
-            f"problem, and sending it again would fail identically"
+            f"HTTP {status} ({label}), which is not retryable -- the request "
+            f"itself is the problem, and sending it again would fail identically"
         )
 
     return LLMTransportError(f"{detail}: {exc}", status_code=status, retryable=retryable)
 
 
-def _first_text(blocks: list[Any]) -> str:
-    """The first `text` block's text, or "" if there is none."""
-    for block in blocks:
-        if getattr(block, "type", None) == "text":
-            return getattr(block, "text", "") or ""
-    return ""
+def _is_daily_quota(exc: genai_errors.APIError) -> bool:
+    """Whether a `RESOURCE_EXHAUSTED` names a daily allowance rather than a rate."""
+    haystack = f"{getattr(exc, 'message', '')} {getattr(exc, 'details', '')}".lower()
+    return any(marker in haystack for marker in _DAILY_QUOTA_MARKERS)
+
+
+def _prompt_block_reason(envelope: Any) -> str | None:
+    """The reason the *input* was blocked, if it was. `None` when it was not."""
+    feedback = getattr(envelope, "prompt_feedback", None)
+    reason = getattr(feedback, "block_reason", None) if feedback is not None else None
+    return _enum_name(reason)
+
+
+def _first_candidate(envelope: Any) -> Any:
+    """The first candidate, or `None`. Only one is ever requested."""
+    candidates = list(getattr(envelope, "candidates", None) or [])
+    return candidates[0] if candidates else None
+
+
+def _finish_reason_of(candidate: Any) -> str | None:
+    if candidate is None:
+        return None
+    return _enum_name(getattr(candidate, "finish_reason", None))
+
+
+def _text_from_parts(candidate: Any) -> str:
+    """Every non-thought text part, joined.
+
+    Joined rather than "the first one", because a long JSON object can arrive
+    split across several text parts and taking only the first would truncate it
+    into a parse failure that looks like the model's fault.
+
+    `thought=True` parts are skipped: that is where the model's reasoning
+    arrives, and it is not the answer.
+    """
+    if candidate is None:
+        return ""
+
+    content = getattr(candidate, "content", None)
+    parts = list(getattr(content, "parts", None) or []) if content is not None else []
+
+    texts = [
+        part.text
+        for part in parts
+        if not getattr(part, "thought", False) and getattr(part, "text", None)
+    ]
+    return "".join(texts)
+
+
+def _enum_name(value: Any) -> str | None:
+    """An SDK enum as its bare name, tolerating a plain string or `None`."""
+    if value is None:
+        return None
+    return getattr(value, "name", None) or str(value)
 
 
 def _usage_of(usage: Any) -> dict[str, int]:
-    """Token counts as a plain dict, tolerating fields the SDK may not send."""
+    """Token counts as a plain dict, under this module's own names.
+
+    Gemini's field names are normalised to the ones `LLMResult` already used, so
+    that an event log written before the provider swap and one written after are
+    still comparable. The keys are part of what a caller sees; the provider's
+    spelling of them is not.
+    """
     if usage is None:
         return {}
 
-    wanted = (
-        "input_tokens",
-        "output_tokens",
-        "cache_read_input_tokens",
-        "cache_creation_input_tokens",
-    )
+    wanted = {
+        "prompt_token_count": "input_tokens",
+        "candidates_token_count": "output_tokens",
+        "cached_content_token_count": "cache_read_input_tokens",
+        "thoughts_token_count": "thinking_tokens",
+    }
     counted = {}
-    for name in wanted:
-        value = getattr(usage, name, None)
+    for source, name in wanted.items():
+        value = getattr(usage, source, None)
         if isinstance(value, int):
             counted[name] = value
     return counted
