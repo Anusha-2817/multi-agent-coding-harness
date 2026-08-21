@@ -67,7 +67,7 @@ from pydantic import BaseModel, ValidationError
 # tokens are drawn from `max_output_tokens`. That is why callers pass generous
 # budgets: too small a budget is spent thinking and returns a `MAX_TOKENS` finish
 # with no text at all.
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.6-flash"
 
 # HTTP attempts beyond the first, handled inside the SDK with backoff.
 DEFAULT_MAX_RETRIES = 3
