@@ -34,6 +34,19 @@ If a task seems to need one of these, stop and ask rather than building it.
 
 **One allowed seam:** the human-approval gate is an injectable callback, so the harness's own tests can drive it. That is the only injection point in v1. It exists because approval is on the critical path of every attempt and is otherwise untestable — not as a precedent for making other collaborators pluggable.
 
+### The one dependency, and where it stops
+
+Phase 3 adds `anthropic` to `requirements.txt`. That is not a hole in the fence, and the reasoning matters more than the outcome.
+
+The fence bans **agent frameworks** — LangGraph, LangChain, CrewAI — because they would build the control loop, and the control loop is the entire project. A provider HTTP client builds nothing of the sort. Hand-rolling `urllib`, exponential backoff with jitter, and `retry-after` parsing would cost a session and demonstrate nothing about agentic systems: it is plumbing every project needs and no project should write twice.
+
+So the boundary is drawn at what the dependency would be *doing for us*:
+
+- **Delegated** — connection handling, HTTP retries with backoff, `retry-after`, typed error classes. `harness/llm.py` configures `max_retries` and `timeout` on the SDK client and lets it do that job.
+- **Hand-rolled, in `harness/llm.py`** — the three-step parse ladder from response text to a JSON value, the repair turn, and the failure taxonomy that decides which failures are worth retrying, which are worth repairing, and which are worth neither.
+
+That split is also why the client calls `messages.create` and not the SDK's `messages.parse`. `parse` would do the extraction and validation for us, and those two steps are exactly what this phase exists to understand. Choosing the harder call deliberately is what keeps this a principled boundary rather than a convenient exception.
+
 **The four agents are parameters of `run_task`, and that is not a second seam.** They are the loop's operands, not a hidden pluggability point: `cli.py` chooses stubs or real ones from `--stub`, and the loop never learns which it got. A `stub: bool` flag would not work anyway — loop tests must hand in *specific scripts* (`failing_edits(1), failing_edits(2), fixing_edits()`), and a boolean cannot express those. The distinction that matters: `approve` is a seam because it stands in for a human, whereas the agents were always going to be passed in by someone.
 
 ---
@@ -47,7 +60,7 @@ Build order. Phases 1–2 make **zero API calls**.
 | 0 | Scaffold, CLAUDE.md, first commit | done |
 | 1 | `TaskState` + all models, `EventLog`, fixture repo 1, Tester, unit tests | done |
 | 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), the approval gate and apply step, scripted failure tests | in progress — 2.1, 2.2, 2.3 done |
-| 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | |
+| 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | in progress — 3A done (client, Planner, Implementer, `cli.py`) |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | |
 | 5 | Fixture repos 2–3, Reviewer-rejection scenario, saved transcripts, README update | |
 
@@ -130,10 +143,16 @@ Format: `<fixture_dir_name>_<UTC timestamp>` — e.g. `fixture_repo_1_20260814T1
 CLI:
 
 ```
-python cli.py --task tasks/fixture_repo_1/task.json [--stub]
+python cli.py --task tasks/fixture_repo_1/task.json
 ```
 
-No YAML. JSON only.
+No YAML. JSON only. `cli.py` reads the task file, generates the `task_id`, prepares the run directory, builds the `TaskState`, constructs the four agents, and supplies the human at the gate. It validates that `task.json` holds *exactly* the two hand-authored fields at the boundary — a typo'd key should name the file it is in, not surface three steps later as a contract violation inside an agent.
+
+**There is no `--stub` flag, and that is a decision, not an omission.** It had nothing coherent to switch at 3A: the Reviewer is stubbed either way, and stubbing the Planner and Implementer from the CLI would need the specific scripts only a test can supply — the same argument that made the agents `run_task` parameters rather than a boolean. It arrives with the real Reviewer in 3B, when it finally means something: all three LLM-backed agents, or none.
+
+**The terminal gate takes the diff and nothing else**, per the ownership table. The note under "The control loop" imagined `cli.py` showing the plan and the verdict alongside it — but the plan does not exist when the callback is built, and widening `run_task`'s signature has no reason to happen before the Reviewer is real. An unreadable stdin (a pipe, a CI job, `< /dev/null`) is read as a refusal: a gate whose failure mode is "approve" is not a gate.
+
+**At 3A the human is the only real gate.** Invariant 1 needs a Review verdict *and* a human approval; until 3B the Reviewer is a stub approving every diff, so one of those two is a stand-in. Worth being plain about rather than discovering from the logs.
 
 ---
 
@@ -171,6 +190,10 @@ Plan: {summary: str, steps: list[str], target_files: list[str], constraints: lis
 
 `constraints` is what the Reviewer's `violated_constraints` refers back to. Without it the Reviewer would be reporting violations of a rubric nobody wrote down.
 
+**`target_files` must be non-empty**, enforced by a field validator on `Plan` as of 3A. An empty list is structurally valid and semantically catastrophic: it puts *every* possible edit outside scope, so the loop burns all five attempts on the scope check and halts with `escalated_retry_limit` while the log reads as though the Implementer kept going outside its plan — the model blamed for a plan that made success unreachable. The validator earns its keep twice over now that `Plan` is LLM-produced: the failure arrives as a `ValidationError` naming the field, and the client's repair turn hands that message straight back to the Planner.
+
+`steps` and `constraints` are deliberately still allowed to be empty. Only `target_files` is load-bearing, and a one-line fix legitimately has no constraints worth writing down.
+
 ### TestResult
 
 ```python
@@ -193,14 +216,22 @@ Deliberately a superset of what `TesterFailure` needs, because the **harness** �
 
 ### Agent contracts
 
-| Agent       | requires                            | produces      | must never read       |
-| ----------- | ----------------------------------- | ------------- | --------------------- |
-| Planner     | `task_description`, `failure_input` | `plan`        | `diff`, `test_result` |
-| Implementer | `plan` (+ `evidence` on retry)      | `edits`       | `test_result`         |
-| Reviewer    | `plan`, `diff`                      | `review`      | `test_result`         |
-| Tester      | `repo_path`                         | `test_result` | `plan`, `diff`        |
+| Agent       | requires                                            | produces      | must never read       |
+| ----------- | --------------------------------------------------- | ------------- | --------------------- |
+| Planner     | `repo_path`, `task_description`, `failure_input`    | `plan`        | `diff`, `test_result` |
+| Implementer | `repo_path`, `plan` (+ `evidence` on retry)         | `edits`       | `test_result`         |
+| Reviewer    | `plan`, `diff`                                      | `review`      | `test_result`         |
+| Tester      | `repo_path`                                         | `test_result` | `plan`, `diff`        |
 
 This is the enforcement half of role purity. Prompts are suggestions; missing fields are guarantees.
+
+**`repo_path` reaches the Planner and the Implementer as of 3A**, and it is a correction rather than a widening. Both were incoherent without it.
+
+The Implementer's contract is *full file replacement*: it cannot emit `new_content` for a file it has never read. The only alternative would be asking a model to reconstruct a file from a description, which is not a plumbing problem this project should invent for itself.
+
+The Planner is the sharper case. It has to produce `target_files`, which the loop enforces mechanically — but `failure_input` is a pytest traceback that stops at the failing *test*, and `fixture_repo_1`'s never mentions `pricing/discounts.py` at all. Neither does `task_description`. A Planner guessing wrong would burn all five attempts on the scope check while the log claimed the model kept going outside its plan: exactly the plumbing-versus-model ambiguity Phase 3 exists to remove.
+
+This does not weaken the "must never read" column. `repo_path` is harness-owned, already in the ownership table, and is neither `diff` nor `test_result`. Reading the repository under test is not reading another agent's output — the Tester has done it since Phase 1.
 
 **The contracts live in one table, `CONTRACTS` in `harness/agents/base.py`.** No agent restates its own. Four entries side by side is how role purity gets checked — you read the whole thing at once and see that `test_result` appears in exactly one `produces` and no `requires`. Per-subclass declarations would scatter the same information across four files, each copy free to drift from this one. A subclass sets `name` and nothing else.
 
@@ -512,10 +543,60 @@ Two rules shape the set. **Every halt goes through `_halt`**, so `run_finished` 
 
 ---
 
+## The LLM client
+
+`harness/llm.py`. One public method, `complete_structured(system=, user=, schema=, max_tokens=) -> LLMResult`: text in, validated Pydantic object out. Agents hold one as a constructor dependency, exactly as the Tester holds its `timeout`.
+
+`schema` must describe a JSON **object**, because that is what the API's structured outputs accepts at the root. `Plan` already is one. `list[FileEdit]` is not, so the Implementer wraps it in `ImplementerResponse {edits: [...]}` — an envelope that lives in `implementer.py` and not in `state.py`, because `state.py` is the typed contract *between agents* and this is the wire format of a single call, unwrapped before it reaches state. `_run` still returns `list[FileEdit]`, exactly as `CONTRACTS` says.
+
+### The client reports; the agent logs
+
+`complete_structured` returns an `LLMResult` — the value, plus `model`, `stop_reason`, `parse_attempts`, and `usage` — rather than the bare object.
+
+It has to. `EventLog.append` needs `attempt` and `agent`, which are loop identity a transport wrapper has no business knowing and which `Agent.log` already has for free. So the client reports what happened and the agent logs it, via `result.log_payload()`. Without this the repair turns and HTTP retries would be the only part of a run leaving no trace, and they are the part worth tracing. `log_payload()` deliberately omits the produced value: `agent_produced` already carries it.
+
+### The parse ladder
+
+Three deterministic steps, cheapest first, in `extract_json`: the whole response (`direct`), a fenced ```` ``` ```` block (`fenced`), first `{` to last `}` (`braces`). Which one fired is returned, not discarded — a run always reaching step 3 is telling you the prompt has stopped working.
+
+This is envelope handling, not sanitising model output, and CLAUDE.md draws that line elsewhere: `render_diff` passes CRLF through untouched because the line endings *are part of the change being reviewed*. Nothing in the ladder alters a byte of the JSON; it only decides where the JSON starts and stops. Being strict instead would spend a repair round trip, at full prompt cost, on a wrapper that costs fifteen lines to see through.
+
+### The failure taxonomy
+
+Four outcomes, three responses. The distinctions exist because each one sends you to a different file.
+
+| Failure | Response |
+| ------- | -------- |
+| Retryable HTTP (429, 5xx, connection) | SDK retries with backoff; `LLMTransportError(retryable=True)` if it still fails |
+| Non-retryable HTTP (400, 401, 404, …) | `LLMTransportError(retryable=False)` immediately — the same bytes fail identically |
+| Malformed JSON, or JSON that fails validation | One repair turn, then `LLMResponseError` |
+| `stop_reason` of `max_tokens` or `refusal` | Raise at once — **never repaired** |
+
+That last row is the one worth stating. A truncated response would truncate at the same place on the retry, so the fix is a larger `max_tokens` — a config change, not a runtime recovery — and a refusal repeats. Both raise from `_text_of`, which sits *outside* the try that triggers the repair; the placement is the mechanism, not a comment.
+
+`extra="forbid"` on every model in `state.py` was chosen for the harness's own reasons and turns out to be exactly what structured outputs requires (`additionalProperties: false`). It also makes an unexpected key a hard validation failure — correct, since an extra key means the model misunderstood its contract, and common enough that the repair turn handles a routine model habit rather than an edge case. Pydantic's `ValidationError` names the offending field, and `describe_problems` hands that straight back to the model.
+
+### LLMResponseError is fatal, for now
+
+It propagates out of `_run`, out of `run_task`, and ends the run in a stack trace rather than a `Status` — like `AgentContractError`. A model that cannot emit its own schema twice is neither a task outcome (no diff was produced to judge) nor recoverable by another attempt.
+
+A seventh `Status` is **deliberately deferred to Phase 4**, which owns escalation output. `escalated_broken_suite` earned its place because the other two escalations would have been lies about a condition the loop reaches on a normal path; this one is rare, and a stack trace naming the raw text is more useful than a status value. Adding one now would be justified by a guess about frequency.
+
+### Reading the repo for a prompt
+
+`workspace.list_repo_files` and `workspace.read_repo_file`. They live beside `apply_edits` because that module owns the run directory, so the two new agents do not each grow their own `Path` arithmetic and their own idea of which directories to skip.
+
+`read_repo_file` keeps its own containment check rather than sharing one with `apply_edits` — the two raise for different reasons and a reader borrowing the writer's message would misdescribe what went wrong. What they share is `normalize_path`, which is the part that has to agree: a reader accepting a spelling the scope check would reject would show the Implementer a file it is not allowed to edit. The check is reachable, not theoretical — `normalize_path` deliberately does not resolve `..` away, so a plan can name an escaping path in `target_files` and the scope check will accept it. Catching it on the read means it never reaches the write.
+
+---
+
 ## Retry vs. backoff — do not conflate
 
 - **Agent retries** (Reviewer rejection, Tester failure) → route back to Implementer with evidence. No delay. The model is stateless; waiting changes nothing about the next output.
 - **HTTP retries** (429, 5xx) → live in the LLM client wrapper, with exponential backoff. Never in the agent loop.
+- **Parse repairs** (malformed JSON, failed validation) → also in the LLM client wrapper, added in 3A. One bounded retry that hands the model its own validation error back. **No delay**, unlike the HTTP backoff one layer down: that exists because the *server* needs time to recover, and a model holds nothing that waiting would improve. It is not a resend either — the repair turn is a different, better-informed request carrying an error message the first one could not have had.
+
+A parse failure must not become an agent retry. The loop's `evidence` says *the diff was wrong*; a model that emitted prose instead of JSON produced no diff at all, so there is nothing for `ReviewerRejection` or `TesterFailure` to describe and nothing for `attempt_count` — whose whole meaning is "how many diffs has this task produced" — to count. This is also why the scope check's precedent does not apply: that reuses `ReviewerRejection` because the corrective action is identical, and here it isn't.
 
 ---
 
@@ -524,6 +605,8 @@ Two rules shape the set. **Every halt goes through `_halt`**, so `run_finished` 
 | Part           | Choice                                                            |
 | -------------- | ----------------------------------------------------------------- |
 | Language       | Python 3.14, no agent framework                                   |
+| LLM transport  | official `anthropic` SDK — see "The one dependency, and where it stops" |
+| LLM model      | `claude-opus-5`, structured outputs, adaptive thinking (default)  |
 | State          | Pydantic v2                                                       |
 | Diff rendering | `difflib.unified_diff` over `edits` + baseline                    |
 | Test execution | `subprocess` running `pytest`                                     |
@@ -586,24 +669,24 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 2 — complete
-**Last completed:** 2.4 — `tests/test_loop.py`, 81 tests. Suite is **220 tests, all passing, about 103s.**
+**Phase:** 3 — in progress. 3A done: the LLM client, the real Planner, the real Implementer, and `cli.py`.
+**Last completed:** 3A. Suite is **346 tests, all passing, about 170s.**
 
-Organised as one class per branch of the loop, each driving one scenario and asserting the pinned numbers. What the classes are for:
+`harness/llm.py` (`LLMClient`, `LLMResult`, `extract_json`, `describe_problems`, `repair_prompt`, and the error hierarchy), `harness/agents/planner.py`, `harness/agents/implementer.py`, `cli.py`, plus `workspace.list_repo_files` / `read_repo_file` and a `target_files` validator on `Plan`. `anthropic==1.0.0` is now in `requirements.txt` — see "The one dependency, and where it stops".
 
-`TestHappyPath`, `TestRetryOnTestFailure` (evidence carried in, and surviving), `TestBaselineReset` (attempt 2's diff carries only its own marker), `TestLivelock`, `TestRetryCap`, `TestHumanRejection`, `TestReviewRejection`, `TestScopeCheck`, `TestPerAttemptFieldsAreCleared`, `TestBrokenSuite`, `TestNoEdits`, `TestPathNormalization`, `TestTheRenderedDiff`, `TestInvariantOne`, `TestTheEventLog`.
+Three new test modules, none of which touch the network: `tests/test_llm.py` (54), `tests/test_prompts.py` (48), `tests/test_cli.py` (20).
 
-Three assertion styles carry most of the weight, and each exists because the terminal state alone cannot show what happened:
+**Every decision from the 3A design pass is argued in full above** — the dependency boundary, `repo_path` in two more contracts, the parse ladder, the repair turn, the failure taxonomy, `LLMResponseError` staying fatal, the `Plan` validator, the entrypoint's shape, and why there is no `--stub` flag yet.
 
-- **A stub's call count proves ordering.** `len(reviewer.seen) == 1` on a two-attempt livelock run is what proves the check runs before Review. `len(approver.seen) == 1` on a review rejection proves the gate is downstream of the verdict. `reviewer.seen == []` proves the scope check is upstream of both.
-- **Byte identity across the three views proves invariant 1's "on that specific diff".** `approver.seen == diffs_reviewed`, on every attempt, plus a re-render against a pristine copy showing that the approved bytes describe exactly what reached disk.
-- **The event log proves attribution and attempt stamping.** One test asserts the exact 25-event sequence of a fail-then-fix run; others assert Planner events at `attempt=0`, every attempt opening with its own `baseline_reset`, and `run_finished` appearing exactly once on all four halting paths.
+Two things worth knowing before touching this next:
 
-**Scenario fixtures are class-scoped `@classmethod`s.** Every attempt costs a `copytree` plus a real pytest subprocess, so a scenario several tests assert against is run once and shared — function scope made the module 213s instead of 55s, because `TestRetryCap` alone re-ran five attempts for each of its six tests. `@classmethod` rather than a plain method because pytest 10 removes class-scoped fixtures defined as instance methods. Sharing is safe only because nothing mutates a `Run`; a test needing to write into the run directory must take its own function-scoped scenario.
+**The Implementer retries blind to its own last attempt.** Its contract is `plan` + `evidence`; `diff` belongs to the Reviewer and the gate, `previous_diffs` to the harness. This is fine for a scope violation (the offending paths are in `violated_constraints`) and largely fine for a test failure (the traceback describes how the code actually behaved). The thin case is a *judged* rejection — "this overreaches the plan" is hard to act on without seeing what you wrote. Left as-is deliberately; Phase 5 builds the fixture that exercises the Reviewer's judgment, and that is when it can be measured rather than guessed at.
 
-Decided during 2.4 and now asserted: **`evidence` survives into a `succeeded` terminal state** — see "evidence survives; that is the point" above.
+**`loop.py`'s reason strings are now prompt text.** `"the Implementer produced no edits"` and `"edited N file(s) outside the plan's target_files: ..."` are read by a model, not just by a human. `render_evidence` quotes them under a `Reason given:` heading rather than inlining them into a sentence, which is why they still read correctly in the second person without needing to be rewritten. Anyone editing those strings is editing a prompt.
 
-Not covered, deliberately: `Status.ESCALATED_BROKEN_SUITE` has no serialization test in `test_state.py` beside the `ESCALATED_LIVELOCK` one. The loop tests exercise it end to end and assert its value round-trips through the log, which is stronger.
+**Livelock gets rarer from here.** The check is defined over byte-identical rendered diffs, and a real model sampling twice rarely produces them. That does not make the check wrong — it is still the right test for the condition it names — but do not expect real runs to trip it the way `test_loop.py` does.
+
+**Next task: 3B — the real Reviewer.** `reviewer.py` is the last stubbed LLM-backed agent, and the one whose prompt matters most: it reads `plan` and `diff`, never `test_result` (invariant 2), and judges faithfulness and minimality now that the scope check has taken mechanical scope off its plate. Its verdict is `ReviewVerdict`, already an object at the schema root, so it needs no envelope. `--stub` lands with it, meaning "all three LLM-backed agents, or none". Until then `cli.py` approves every diff by script and the human is the only real gate.
 
 Previously: 2.3 — `harness/loop.py` (`run_task`, `render_diff`, `MAX_ATTEMPTS`, `LIVELOCK_REASON`), `workspace.apply_edits` and `workspace.normalize_path`, `Status.ESCALATED_BROKEN_SUITE`, `StubApprover`, and `out_of_scope_edits()`. `write_edits` now delegates to `apply_edits`. See "The control loop" above for the whole of it.
 
@@ -633,14 +716,8 @@ Decisions folded in so far: the `Plan` shape with `target_files` as a mechanical
 
 Conventions worth not re-litigating: `None` means "not yet produced" and is what the agent contract assertion checks — so `edits` is `Optional`, never defaulting to `[]`, or "never ran" and "ran and produced nothing" become indistinguishable. Harness-owned fields with a meaningful empty value (`attempt_count`, `previous_diffs`, `status`) get real defaults instead. `extra="forbid"` everywhere. Paths are `str` in models, never `Path`, so state round-trips through the JSONL log with no custom serializer. `max_attempts` is a module constant in `loop.py`, not a `TaskState` field. The event log degrades a bad payload rather than raising — logging must not be able to kill a run.
 
-**Next task:** the entrypoint — `cli.py` is still empty, and it is now the only thing between a working harness and a runnable one. Nothing yet reads `task.json`, calls `make_task_id()`, calls `prepare_run_dir`, constructs the `TaskState`, or supplies a real terminal approval callback. `run_task` was written to be driven by exactly that and is driven by nothing today.
+(The three open shape questions this section used to carry — what the gate prints, what a run reports on exit, and whether `--stub` needs scripts — were all settled in 3A. See "task.json" and the CLI notes above.)
 
-Everything it needs already exists and is tested. The open shape questions are small and local to `cli.py`:
+Phases 1–2 made zero API calls and that held. Phase 3 is the first one that does not — and the whole test suite still makes none: the SDK is faked wherever it is reached for, and no test needs an API key.
 
-- What the terminal gate prints before asking. The diff is the only thing `approve` receives, but `cli.py` builds the callback and holds the state, so it can show the plan and the verdict alongside — see the note on widening `approve` under "The control loop".
-- What a run reports on exit, per status. Four of the five terminal statuses are failures with different causes, and Phase 4 owns "escalation output" — so keep this to something plain and leave the packaging to that phase.
-- Whether `--stub` needs scripts at all. A stub run from the CLI has no test to script it; the honest options are a fixed one-attempt script or dropping `--stub` from the CLI and leaving stubs to the tests. Decide before building it.
-
-Phases 1–2 made zero API calls and that held. Phase 3 is the first one that does not.
-
-**Open questions:** none
+**Open questions:** whether `LLMResponseError` deserves a seventh `Status`. Deferred to Phase 4 on purpose — see "LLMResponseError is fatal, for now". Decide it with evidence from real runs, not before.

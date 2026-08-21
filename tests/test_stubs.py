@@ -158,12 +158,12 @@ class TestRecordingWhatWasHanded:
 
         assert stub.seen == [{"plan": PLAN, "diff": "--- a\n+++ b\n"}]
 
-    def test_the_planner_records_its_two_inputs(self, event_log):
+    def test_the_planner_records_its_contracted_inputs(self, event_log):
         stub = StubPlanner(event_log, [PLAN])
 
         stub.run(state())
 
-        assert set(stub.seen[0]) == {"task_description", "failure_input"}
+        assert set(stub.seen[0]) == {"repo_path", "task_description", "failure_input"}
 
     def test_a_stub_sees_only_its_contracted_fields(self, event_log):
         """The stubs inherit the base class's filtering, so a scripted Reviewer

@@ -105,6 +105,43 @@ class TestTestResultModel:
         assert nothing_failed.summary_parsed != could_not_tell.summary_parsed
 
 
+class TestPlanTargetFiles:
+    """`target_files == []` is structurally valid and semantically catastrophic.
+
+    It puts every possible edit outside scope, so the loop burns all five
+    attempts on the scope check and halts with `escalated_retry_limit` while the
+    log reads as though the Implementer kept going outside its plan. Rejecting it
+    at the boundary keeps the model from being blamed for a plan that made
+    success unreachable.
+    """
+
+    def test_an_empty_target_files_is_rejected(self):
+        with pytest.raises(ValidationError) as exc_info:
+            Plan(summary="s", steps=["step"], target_files=[], constraints=[])
+
+        assert "target_files" in str(exc_info.value)
+
+    def test_the_message_says_why_rather_than_just_that(self):
+        """This is LLM-produced, so the message goes back to the Planner in the
+        client's repair turn. It has to be actionable."""
+        with pytest.raises(ValidationError) as exc_info:
+            Plan(summary="s", steps=["step"], target_files=[], constraints=[])
+
+        assert "at least one file" in str(exc_info.value)
+
+    def test_one_target_file_is_enough(self):
+        plan = Plan(summary="s", steps=[], target_files=["pricing/discounts.py"], constraints=[])
+
+        assert plan.target_files == ["pricing/discounts.py"]
+
+    def test_the_other_list_fields_may_still_be_empty(self):
+        """Only `target_files` is load-bearing. A one-line fix legitimately has
+        no constraints worth writing down."""
+        plan = Plan(summary="s", steps=[], target_files=["a.py"], constraints=[])
+
+        assert plan.steps == [] and plan.constraints == []
+
+
 class TestReviewVerdict:
     def test_violated_constraints_is_required_even_when_approving(self):
         with pytest.raises(ValidationError) as exc_info:

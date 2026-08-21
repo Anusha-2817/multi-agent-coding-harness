@@ -97,8 +97,12 @@ class StubPlanner(_ScriptedAgent):
     def __init__(self, event_log: EventLog, plans: Sequence[Plan]) -> None:
         super().__init__(event_log, plans)
 
-    def _run(self, *, task_description: str, failure_input: str) -> Plan:
-        return self._scripted(task_description=task_description, failure_input=failure_input)
+    def _run(self, *, repo_path: str, task_description: str, failure_input: str) -> Plan:
+        return self._scripted(
+            repo_path=repo_path,
+            task_description=task_description,
+            failure_input=failure_input,
+        )
 
 
 class StubImplementer(_ScriptedAgent):
@@ -115,8 +119,8 @@ class StubImplementer(_ScriptedAgent):
     def __init__(self, event_log: EventLog, edit_lists: Sequence[list[FileEdit]]) -> None:
         super().__init__(event_log, edit_lists)
 
-    def _run(self, *, plan: Plan, evidence: Evidence | None) -> list[FileEdit]:
-        return self._scripted(plan=plan, evidence=evidence)
+    def _run(self, *, repo_path: str, plan: Plan, evidence: Evidence | None) -> list[FileEdit]:
+        return self._scripted(repo_path=repo_path, plan=plan, evidence=evidence)
 
 
 class StubReviewer(_ScriptedAgent):

@@ -75,6 +75,31 @@ class Plan(_Model):
     target_files: list[str]
     constraints: list[str]
 
+    @field_validator("target_files")
+    @classmethod
+    def _require_at_least_one_target(cls, value: list[str]) -> list[str]:
+        """An empty `target_files` is a reachable, silent disaster. Reject it here.
+
+        A `Plan` with `target_files == []` is structurally valid and semantically
+        catastrophic: it puts *every* possible edit outside scope, so the loop
+        burns all five attempts on the scope check and halts with
+        `escalated_retry_limit` while the log reads as though the Implementer
+        kept going outside its plan. That is exactly the plumbing-versus-model
+        ambiguity Phase 3 exists to remove -- the model would be blamed for a
+        plan that made success unreachable.
+
+        Rejecting at the boundary also earns its keep in the prompt: this is an
+        LLM-produced model, so the failure arrives as a `ValidationError` naming
+        this field, and the LLM client's repair turn hands that message straight
+        back to the Planner.
+        """
+        if not value:
+            raise ValueError(
+                "target_files must name at least one file; a plan that targets "
+                "nothing puts every possible edit outside its own scope"
+            )
+        return value
+
 
 class FileEdit(_Model):
     """Full file replacement, not a patch. CLAUDE.md, "Edits, not patches".

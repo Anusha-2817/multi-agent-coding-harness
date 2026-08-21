@@ -77,13 +77,26 @@ class Contract:
 # The table from CLAUDE.md, "Agent contracts". The "must never read" column has
 # no entry here because it needs none: an agent reads what it is passed, and it
 # is passed `requires + optional`. Absence is the enforcement.
+#
+# `repo_path` is in the Planner's and the Implementer's `requires` because both
+# are incoherent without it, not as a convenience. The Implementer's contract is
+# *full file replacement*: it cannot emit `new_content` for a file it has never
+# read. And the Planner has to produce `target_files`, which the loop enforces
+# mechanically -- but `failure_input` is a pytest traceback that stops at the
+# failing test, so nothing in the Planner's other inputs names the file holding
+# the bug. A Planner guessing wrong burns all five attempts on the scope check
+# while the log blames the model for a plumbing failure.
+#
+# This does not weaken the "must never read" column: `repo_path` is
+# harness-owned, already in the ownership table, and is neither `diff` nor
+# `test_result`. Reading the repository is not reading another agent's output.
 CONTRACTS: dict[str, Contract] = {
     "planner": Contract(
-        requires=("task_description", "failure_input"),
+        requires=("repo_path", "task_description", "failure_input"),
         produces="plan",
     ),
     "implementer": Contract(
-        requires=("plan",),
+        requires=("repo_path", "plan"),
         optional=("evidence",),
         produces="edits",
     ),

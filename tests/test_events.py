@@ -187,7 +187,7 @@ class TestPydanticPayloads:
 
     def test_models_nested_in_lists_serialise(self, log):
         plans = [
-            Plan(summary=f"p{i}", steps=[], target_files=[], constraints=[])
+            Plan(summary=f"p{i}", steps=[], target_files=["pricing/discounts.py"], constraints=[])
             for i in range(2)
         ]
 

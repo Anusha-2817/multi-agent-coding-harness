@@ -82,8 +82,8 @@ class ProbeImplementer(Agent):
         self.seen: list[dict] = []
         self.edits = edits if edits is not None else [FileEdit(path="pricing/discounts.py", new_content="x = 1\n")]
 
-    def _run(self, *, plan, evidence):
-        self.seen.append({"plan": plan, "evidence": evidence})
+    def _run(self, *, repo_path, plan, evidence):
+        self.seen.append({"repo_path": repo_path, "plan": plan, "evidence": evidence})
         return self.edits
 
 
@@ -92,7 +92,7 @@ class SilentPlanner(Agent):
 
     name = "planner"
 
-    def _run(self, *, task_description, failure_input):
+    def _run(self, *, repo_path, task_description, failure_input):
         return None
 
 
@@ -141,10 +141,10 @@ class TestContractTable:
         """CLAUDE.md, "Agent contracts". If this test and that table disagree,
         one of them is wrong and it is worth finding out which."""
         assert CONTRACTS["planner"] == Contract(
-            requires=("task_description", "failure_input"), produces="plan"
+            requires=("repo_path", "task_description", "failure_input"), produces="plan"
         )
         assert CONTRACTS["implementer"] == Contract(
-            requires=("plan",), optional=("evidence",), produces="edits"
+            requires=("repo_path", "plan"), optional=("evidence",), produces="edits"
         )
         assert CONTRACTS["reviewer"] == Contract(requires=("plan", "diff"), produces="review")
         assert CONTRACTS["tester"] == Contract(requires=("repo_path",), produces="test_result")
@@ -241,7 +241,12 @@ class TestOnlyContractedFieldsAreVisible:
 
         probe.run(state(plan=PLAN))
 
-        assert probe.seen == [{"plan": PLAN, "evidence": None}]
+        # The key is present with a None value, not missing. That is what keeps
+        # `_run`'s signature the same shape on a first attempt and on a retry.
+        assert len(probe.seen) == 1
+        assert "evidence" in probe.seen[0]
+        assert probe.seen[0]["evidence"] is None
+        assert probe.seen[0]["plan"] == PLAN
 
     def test_an_optional_field_is_passed_when_present(self, event_log):
         probe = ProbeImplementer(event_log)
@@ -343,7 +348,7 @@ class TestProducedField:
         class SloppyImplementer(Agent):
             name = "implementer"
 
-            def _run(self, *, plan, evidence):
+            def _run(self, *, repo_path, plan, evidence):
                 return ["pricing/discounts.py"]  # str, not FileEdit
 
         with pytest.raises(ValidationError) as caught:

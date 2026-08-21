@@ -25,7 +25,8 @@ RUNS_ROOT = "runs"
 # Copied fixtures never carry stale bytecode or a stale pytest cache into a run.
 # The Tester clears these again inside the run directory before invoking pytest,
 # because the previous attempt's run generated its own.
-IGNORED = shutil.ignore_patterns("__pycache__", ".pytest_cache")
+_CACHE_DIR_NAMES = ("__pycache__", ".pytest_cache")
+IGNORED = shutil.ignore_patterns(*_CACHE_DIR_NAMES)
 
 
 def normalize_path(path: str) -> str:
@@ -86,6 +87,53 @@ def reset_run_dir(
     target = Path(runs_root) / task_id
     shutil.rmtree(target, ignore_errors=True)
     return prepare_run_dir(task_id, fixture_path, runs_root)
+
+
+def list_repo_files(repo_path: str | Path) -> list[str]:
+    """Every file in the run directory, as sorted normalised relative paths.
+
+    Reading lives here for the same reason writing does: this module owns the
+    run directory, so the agents that need to see it do not each grow their own
+    `Path` arithmetic and their own idea of which directories to skip.
+
+    Sorted, so a prompt built from this is byte-stable across runs -- the same
+    reason `render_diff` sorts its edits. Cache directories are skipped, matching
+    what `copytree` already ignored; a `.pyc` in a prompt is pure noise.
+    """
+    root = Path(repo_path)
+    skip = set(_CACHE_DIR_NAMES)
+    found = [
+        normalize_path(str(path.relative_to(root)))
+        for path in root.rglob("*")
+        if path.is_file() and not skip.intersection(path.parts)
+    ]
+    return sorted(found)
+
+
+def read_repo_file(repo_path: str | Path, relative: str) -> str:
+    """Read one file out of the run directory, by repo-relative path.
+
+    Its own containment check rather than a shared one with `apply_edits`: the
+    two raise for different reasons and a reader that borrowed the writer's
+    error message would misdescribe what went wrong. What they do share is
+    `normalize_path`, which is the part that has to agree -- if the reader
+    accepted a spelling the scope check would reject, the Implementer would be
+    shown a file it is not allowed to edit.
+
+    Raises `ValueError` if the path escapes `repo_path`. Reachable from a plan
+    whose `target_files` names `../something`, which the scope check would
+    happily accept: `normalize_path` deliberately does not resolve `..` away, so
+    a plan can name an escaping path and an Implementer can faithfully target it.
+    Catching it on the read means it never reaches the write.
+    """
+    root = Path(repo_path).resolve()
+    target = (root / normalize_path(relative)).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError(
+            f"path {relative!r} resolves to {target}, which is outside "
+            f"the run directory {root}"
+        )
+    return target.read_text(encoding="utf-8")
 
 
 def apply_edits(repo_path: str | Path, edits: list[FileEdit]) -> list[str]:
