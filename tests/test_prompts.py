@@ -1,13 +1,18 @@
-"""Tests for what the Planner and Implementer actually send.
+"""Tests for what the Planner, Implementer, and Reviewer actually send.
 
 Prompts are the only part of an LLM-backed agent that can be checked without a
 model in the way, so they are checked hard here. Every rendering function is
 pure -- state and files in, string out -- which is why they are module-level
 functions rather than methods buried inside `_run`.
 
-The two agents are also exercised end to end against a fake client, to prove the
-rendered text is what reaches the wire and that the produced value is unwrapped
-correctly. No API key, no network.
+All three agents are also exercised end to end against a fake client, to prove
+the rendered text is what reaches the wire and that the produced value is
+unwrapped correctly. No API key, no network.
+
+What these cannot check is judgment: whether the Reviewer's prompt actually
+stops it rubber-stamping is not a property of the rendered text. That needs a
+diff which stays inside `target_files` and is unfaithful to the plan, which is
+Phase 5's fixture.
 """
 
 from __future__ import annotations
@@ -29,9 +34,19 @@ from harness.agents.implementer import (
 from harness.agents.implementer import render_user_message as implementer_message
 from harness.agents.planner import Planner, render_repo
 from harness.agents.planner import render_user_message as planner_message
+from harness.agents.reviewer import NONE_STATED, Reviewer
+from harness.agents.reviewer import render_plan as reviewer_render_plan
+from harness.agents.reviewer import render_user_message as reviewer_message
 from harness.events import EventLog
-from harness.llm import LLMResult
-from harness.state import FileEdit, Plan, ReviewerRejection, TaskState, TesterFailure
+from harness.llm import DEFAULT_MODEL, LLMResult
+from harness.state import (
+    FileEdit,
+    Plan,
+    ReviewerRejection,
+    ReviewVerdict,
+    TaskState,
+    TesterFailure,
+)
 
 FIXTURE = Path(__file__).resolve().parent.parent / "tasks" / "fixture_repo_1"
 DISCOUNTS = "pricing/discounts.py"
@@ -53,6 +68,20 @@ FAILURE = TesterFailure(
     traceback="E       AssertionError: assert Decimal('125.00') == Decimal('118.75')",
     stdout_tail="1 failed, 19 passed in 0.23s",
 )
+
+# A real unified diff, shaped like what `render_diff` emits: `a/`-`b/` labels, no
+# timestamps. The Reviewer's user message must carry this untouched, and the
+# `---`/`+++`/`@@` in it are why the sections are tagged rather than delimited.
+DIFF = """\
+--- a/pricing/discounts.py
++++ b/pricing/discounts.py
+@@ -18,7 +18,7 @@
+     for tier in TIERS:
+-        if quantity > tier.minimum:
++        if quantity >= tier.minimum:
+             return tier
+     return BASE_TIER
+"""
 
 
 @pytest.fixture
@@ -81,7 +110,10 @@ class FakeClient:
         )
         return LLMResult(
             value=self.value,
-            model="claude-opus-5",
+            # Bound to the real constant rather than a literal. This value is
+            # inert -- no assertion reads it -- and the literal that used to be
+            # here outlived the provider it named by a whole phase.
+            model=DEFAULT_MODEL,
             stop_reason="end_turn",
             parse_attempts=1,
             usage={"input_tokens": 10, "output_tokens": 5},
@@ -473,3 +505,207 @@ class TestTheImplementerAgent:
         Implementer(event_log, client).run(state(repo, plan=PLAN))
 
         assert logged(event_log)[0]["payload"]["evidence_kind"] is None
+
+
+# -- the Reviewer's prompt ---------------------------------------------------
+
+
+class TestReviewerPlanRendering:
+    """A second `render_plan`, deliberately. See the docstring on the function:
+    the Reviewer cites steps by number and needs to know when a section is empty
+    rather than dropped."""
+
+    def test_every_plan_field_appears(self):
+        rendered = reviewer_render_plan(PLAN)
+
+        assert PLAN.summary in rendered
+        assert PLAN.steps[0] in rendered
+        assert DISCOUNTS in rendered
+        assert "Do not change the TIERS table" in rendered
+
+    def test_steps_are_numbered_because_the_reason_cites_them_by_number(self):
+        plan = PLAN.model_copy(update={"steps": ["first thing", "second thing"]})
+
+        rendered = reviewer_render_plan(plan)
+
+        assert "1. first thing" in rendered
+        assert "2. second thing" in rendered
+
+    def test_an_empty_section_says_none_stated_rather_than_being_dropped(self):
+        """The Implementer's renderer omits an empty heading, correctly. Here the
+        emptiness is information: the agent is told to check each entry in turn,
+        so "there are none" and "the section was cut" must not look alike."""
+        plan = PLAN.model_copy(update={"steps": [], "constraints": []})
+
+        rendered = reviewer_render_plan(plan)
+
+        assert f"Steps:\n{NONE_STATED}" in rendered
+        assert f"Constraints:\n{NONE_STATED}" in rendered
+
+    def test_it_differs_from_the_implementers_rendering_on_an_empty_plan(self):
+        """The duplication is load-bearing, not an oversight. If these two ever
+        converge, one of them has lost a property it was given on purpose."""
+        plan = PLAN.model_copy(update={"steps": [], "constraints": []})
+
+        assert reviewer_render_plan(plan) != render_plan(plan)
+
+
+class TestReviewerUserMessage:
+    def test_the_diff_is_carried_verbatim(self):
+        rendered = reviewer_message(plan=PLAN, diff=DIFF)
+
+        assert DIFF in rendered
+
+    def test_the_two_inputs_are_separately_tagged(self):
+        rendered = reviewer_message(plan=PLAN, diff=DIFF)
+
+        assert "<plan>" in rendered and "</plan>" in rendered
+        assert "<diff>" in rendered and "</diff>" in rendered
+
+    def test_the_plan_comes_before_the_diff(self):
+        rendered = reviewer_message(plan=PLAN, diff=DIFF)
+
+        assert rendered.index("<plan>") < rendered.index("<diff>")
+
+    def test_no_repository_contents_reach_the_prompt(self):
+        """The contract is `plan` and `diff`. Widening it is the revisit trigger
+        Phase 5 is supposed to supply evidence for, not something that should
+        creep in through the renderer."""
+        rendered = reviewer_message(plan=PLAN, diff=DIFF)
+
+        assert "<file " not in rendered
+        assert "<current_files>" not in rendered
+
+    def test_a_diff_full_of_markdown_lookalikes_survives(self):
+        """`---`, `+++` and `@@` are exactly what a lightweight delimiter would
+        collide with, which is why the sections are tagged."""
+        rendered = reviewer_message(plan=PLAN, diff=DIFF)
+
+        assert "--- a/pricing/discounts.py" in rendered
+        assert "+++ b/pricing/discounts.py" in rendered
+
+
+class TestReviewerSystemPrompt:
+    def test_it_says_the_reviewer_will_not_get_test_results(self):
+        """Invariant 2 is enforced by omission in `base.py`. Saying so in the
+        prompt is what stops the model asking for them or assuming them."""
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        assert "you do not have the test results" in SYSTEM_PROMPT.lower()
+
+    def test_it_names_the_hardcoded_fix_as_the_case_blind_review_exists_for(self):
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        assert "hardcoding the values the test happens to use" in SYSTEM_PROMPT
+        assert "special-cases" in SYSTEM_PROMPT
+
+    def test_it_says_the_mechanical_checks_have_already_run(self):
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        assert "Do not re-check those" in SYSTEM_PROMPT
+        assert "target_files" in SYSTEM_PROMPT
+
+    def test_it_asks_for_attribution_in_both_directions(self):
+        """Hunk-to-step catches overreach; step-to-hunk catches an unfinished
+        change. Only one of the two is the obvious one."""
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        assert "name the numbered step it carries out" in SYSTEM_PROMPT
+        assert "A step with no hunk is" in SYSTEM_PROMPT
+
+    def test_it_puts_the_reason_before_the_verdict(self):
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        assert "Write your reason first, then decide." in SYSTEM_PROMPT
+
+    def test_it_forbids_reviewing_the_plan_and_says_what_that_would_cost(self):
+        """v1 never replans, so a "this plan is wrong" rejection routes back to
+        an Implementer that can only implement the same plan again.
+
+        Asserted against whitespace-collapsed text: this sentence spans a line
+        break, and a prompt reflowed for readability should not fail a test
+        about what the prompt says."""
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        unwrapped = " ".join(SYSTEM_PROMPT.split())
+        assert "You do not review the plan." in unwrapped
+        assert "Nothing in this system replans" in unwrapped
+
+    def test_it_names_the_cost_of_a_wrong_rejection_as_well_as_a_wrong_approval(self):
+        """A prompt that only names one of the two errors optimises for that one.
+        This is the half that keeps it from rejecting good diffs."""
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        assert "Approving a change that does not match the plan puts it on disk" in SYSTEM_PROMPT
+        assert "costs one of five attempts" in SYSTEM_PROMPT
+        assert 'neither "be strict" nor "be lenient"' in SYSTEM_PROMPT
+
+    def test_it_lists_things_that_are_not_grounds_for_rejection(self):
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        assert "These are not grounds for rejection" in SYSTEM_PROMPT
+        assert "Style, naming, formatting" in SYSTEM_PROMPT
+        assert "Missing tests" in SYSTEM_PROMPT
+
+    def test_it_requires_a_rejection_the_implementer_can_act_on(self):
+        """The Implementer retries blind to its own diff, so the reason is the
+        only channel. It doubles as a filter on vague rejections."""
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        assert "the reason is the only thing the implementer will be shown" in SYSTEM_PROMPT
+        assert "does not get to see the diff it wrote" in SYSTEM_PROMPT
+
+    def test_it_confines_violated_constraints_to_the_plans_own_wording(self):
+        from harness.agents.reviewer import SYSTEM_PROMPT
+
+        assert "word for word as the plan wrote" in SYSTEM_PROMPT
+        assert "Put nothing else in that field" in SYSTEM_PROMPT
+
+
+class TestTheReviewerAgent:
+    def test_it_sends_the_rendered_message_and_returns_the_verdict(self, repo, event_log):
+        verdict = ReviewVerdict(
+            reason="hunk 1 carries out step 1; no unaccounted hunks.",
+            approved=True,
+            violated_constraints=[],
+        )
+        client = FakeClient(verdict)
+
+        produced = Reviewer(event_log, client).run(state(repo, plan=PLAN, diff=DIFF))
+
+        assert produced.review == verdict
+        assert client.calls[0]["user"] == reviewer_message(plan=PLAN, diff=DIFF)
+
+    def test_the_verdict_needs_no_envelope(self, repo, event_log):
+        """Unlike `list[FileEdit]`, `ReviewVerdict` is already an object at the
+        schema root, which is what `response_json_schema` accepts."""
+        client = FakeClient(
+            ReviewVerdict(reason="fine", approved=True, violated_constraints=[])
+        )
+
+        Reviewer(event_log, client).run(state(repo, plan=PLAN, diff=DIFF))
+
+        assert client.calls[0]["schema"] is ReviewVerdict
+
+    def test_it_logs_the_call_without_relogging_the_verdict(self, repo, event_log):
+        client = FakeClient(
+            ReviewVerdict(reason="too broad", approved=False, violated_constraints=["c1"])
+        )
+
+        Reviewer(event_log, client).run(state(repo, plan=PLAN, diff=DIFF))
+
+        events = logged(event_log)
+        assert [event["event"] for event in events] == [
+            "llm_request",
+            "llm_response",
+            "agent_produced",
+        ]
+        assert "review" not in events[1]["payload"]
+        assert events[2]["payload"]["review"]["approved"] is False
+
+    def test_the_schema_puts_reason_before_approved(self):
+        """Property order is emission order, and reason-first is the cheapest
+        guard there is against a verdict written before the reasoning."""
+        properties = list(ReviewVerdict.model_json_schema()["properties"])
+
+        assert properties.index("reason") < properties.index("approved")

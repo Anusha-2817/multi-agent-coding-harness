@@ -62,11 +62,13 @@ Build order. Phases 1–2 make **zero API calls**.
 | 0 | Scaffold, CLAUDE.md, first commit | done |
 | 1 | `TaskState` + all models, `EventLog`, fixture repo 1, Tester, unit tests | done |
 | 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), the approval gate and apply step, scripted failure tests | in progress — 2.1, 2.2, 2.3 done |
-| 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | in progress — 3A done (client, Planner, Implementer, `cli.py`), 3A.1 done (Anthropic → Gemini) |
+| 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | done — 3A (client, Planner, Implementer, `cli.py`), 3A.1 (Anthropic → Gemini), 3B (Reviewer, `--stub`) |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | |
 | 5 | Fixture repos 2–3, Reviewer-rejection scenario, saved transcripts, README update | |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
+
+That fixture is now carrying two questions, not one. It is the only thing that can show whether the 3B prompt's anti-rubber-stamp guards actually fire, and it is the **revisit trigger** for the Reviewer's `plan`+`diff` contract — see "The Reviewer". Both were argued rather than measured, and both should be decided on what that fixture produces.
 
 The Tester lands in Phase 1, before any agent scaffolding, because it is the only agent that needs no LLM and because a working Tester is what makes Phase 2's scripted failures verifiable.
 
@@ -145,16 +147,35 @@ Format: `<fixture_dir_name>_<UTC timestamp>` — e.g. `fixture_repo_1_20260814T1
 CLI:
 
 ```
-python cli.py --task tasks/fixture_repo_1/task.json
+python cli.py --task tasks/fixture_repo_1/task.json [--stub]
 ```
 
 No YAML. JSON only. `cli.py` reads the task file, generates the `task_id`, prepares the run directory, builds the `TaskState`, constructs the four agents, and supplies the human at the gate. It validates that `task.json` holds *exactly* the two hand-authored fields at the boundary — a typo'd key should name the file it is in, not surface three steps later as a contract violation inside an agent.
 
-**There is no `--stub` flag, and that is a decision, not an omission.** It had nothing coherent to switch at 3A: the Reviewer is stubbed either way, and stubbing the Planner and Implementer from the CLI would need the specific scripts only a test can supply — the same argument that made the agents `run_task` parameters rather than a boolean. It arrives with the real Reviewer in 3B, when it finally means something: all three LLM-backed agents, or none.
+**The terminal gate takes the diff and nothing else**, per the ownership table. The note under "The control loop" imagined `cli.py` showing the plan and the verdict alongside it. The Reviewer is real as of 3B, so the old reason to wait has expired — but the reason to stay narrow has not: the callback is built before `run_task` runs and so before any plan or verdict exists, and widening to `approve(diff, review)` would change `run_task`'s signature for a display convenience. Do it when someone at the gate actually wants it, not because it became possible. An unreadable stdin (a pipe, a CI job, `< /dev/null`) is read as a refusal: a gate whose failure mode is "approve" is not a gate.
 
-**The terminal gate takes the diff and nothing else**, per the ownership table. The note under "The control loop" imagined `cli.py` showing the plan and the verdict alongside it — but the plan does not exist when the callback is built, and widening `run_task`'s signature has no reason to happen before the Reviewer is real. An unreadable stdin (a pipe, a CI job, `< /dev/null`) is read as a refusal: a gate whose failure mode is "approve" is not a gate.
+**At 3A the human was the only real gate** — invariant 1 needs a Review verdict *and* a human approval, and the Reviewer was a stub approving every diff. As of 3B both gates are real on the default path. Under `--stub` the human is again the only one, which is what the flag's name says.
 
-**At 3A the human is the only real gate.** Invariant 1 needs a Review verdict *and* a human approval; until 3B the Reviewer is a stub approving every diff, so one of those two is a stand-in. Worth being plain about rather than discovering from the logs.
+### `--stub`
+
+Added in 3B, when it finally had something coherent to switch. It means **all three LLM-backed agents, or none.** Real is the default; `--stub` opts out.
+
+What it does **not** switch, and both omissions are load-bearing:
+
+- **The Tester.** Real since Phase 1, never stubbed. A stub run's verdict on the suite is a real pytest verdict.
+- **The approval gate.** `StubApprover` exists so *tests* can reach the apply step. A flag that let the shipped entrypoint skip the human would be the exact shape invariant 1 exists to prevent — the same argument that keeps `write_edits` in `tests/`. A stub run still stops at a terminal and asks.
+
+**A stub run needs no API key, and that is most of the point.** `LLMClient` is constructed only on the real path, so `--stub` runs when `GEMINI_API_KEY` is unset or the day's quota is gone. What it is for is checking that the wiring still holds — `loop.py`, `workspace.py`, the gate, the event log, the real Tester — without spending a request. The key check keeps its old placement, before anything is copied.
+
+**A stub run cannot succeed, and says so.** The scripted agents decide nothing, so they cannot fix a bug they were never told about. `stub_agents` reads the run directory, targets the first non-test `.py` file, and scripts five edit lists that append `# stub attempt n` to it — the `failing_edits(n)` shape, generalised. The suite stays red, so the run walks every step — reset, no-edits check, scope check, render, livelock, review, gate, apply, Tester, evidence, retry — and halts at `escalated_retry_limit`. The marker is load-bearing for the reason it is in `fixture_edits.py`: without it, two attempts would render byte-identical diffs and halt on livelock at attempt 2, short of the retry path this exists to exercise. Answering `n` at the first gate ends it sooner, having still exercised everything up to apply.
+
+The plan it scripts targets **exactly the one file the stub Implementer edits**, not every source file. A plan naming everything would make the scope check vacuous, and the point of a stub run is that every step does its real work.
+
+**The rejected alternative** was a per-fixture canned script that *does* fix the bug, so a stub run could reach `succeeded`. It would put each fixture's fix in a second place — either hardcoded in `cli.py`, where it would silently misbehave on fixtures 2–3, or in a new per-fixture artifact. That is the duplication `tests/fixture_edits.py` reads the fixture to avoid. Being fixture-agnostic and ending red is the better trade: it works on fixture repos 2 and 3 the day they are added.
+
+**`run_started` did not grow a field for it.** Which agents ran is already unambiguous from the log — the stubs write `stub_scripted`, the real agents write `llm_request` — so the mode is printed in the CLI banner for the person at the terminal and the harness event table is untouched.
+
+`cli.stub_targets` uses a cruder test-file rule than `planner._is_test_file`, deliberately unshared. The Planner's version decides what a model is shown and might be tempted to edit; this one only has to pick a file that exists and that appending a comment to cannot break. Sharing would make a real decision answer to a placeholder's needs.
 
 ---
 
@@ -273,6 +294,8 @@ The base class logs `agent_produced` (payload keyed by the produced field name) 
 
 `harness/agents/stubs.py` holds `StubPlanner`, `StubImplementer`, `StubReviewer` — the three LLM-backed roles. The Tester is real from Phase 1 and is never stubbed.
 
+All three have real counterparts as of 3B, and these did **not** become dead code. They are what `test_loop.py` drives, and as of 3B they are also what `--stub` wires — the same objects, scripted by `cli.stub_agents` instead of by a test.
+
 **A stub is scripted, not smart.** Each takes a sequence of return values and hands out one per call, indexed by call count, deciding nothing. A `StubImplementer` that read `evidence` and "fixed itself" on the third attempt would turn every loop test into a test of the stub's cleverness instead of the loop's routing — the assertion would still pass if the loop had routed nothing back at all.
 
 Two capabilities beyond returning a value, both there so loop tests can assert something:
@@ -307,10 +330,21 @@ All are verified end to end through the real Tester: red is really red, green is
 ## Review verdict
 
 ```python
-ReviewVerdict: {approved: bool, reason: str, violated_constraints: list[str]}
+ReviewVerdict: {reason: str, approved: bool, violated_constraints: list[str]}
 ```
 
 The Reviewer produces the verdict. The **harness** converts a rejection into a `ReviewerRejection` and writes it to `evidence` — the Reviewer never writes `evidence` itself, consistent with the ownership table.
+
+**`reason` is declared before `approved` as of 3B, and the order is the point.** This model goes over the wire as `response_json_schema`, and property order in the schema is the order the model emits its fields in. Verdict-first has it commit to yes or no and then write a justification for a decision already made; reason-first makes it walk the diff against the plan and arrive at the verdict. It is the cheapest guard there is against a Reviewer that approves everything, and it costs nothing — no code reads these fields by position, Pydantic models are keyword-only at construction, and `extra="forbid"` and validation are unaffected.
+
+### Who writes what into `violated_constraints`
+
+Two writers, and they do not agree. That is deliberate, and the resolution is to name them rather than to force consistency that is not reachable:
+
+- **The Reviewer** puts verbatim entries from `plan.constraints` there, and nothing else. It is a list of the plan's own rubric, not a second place to write prose — the reason field is where the prose goes. An empty list on a rejection is normal: most rejections are about attribution or correspondence, and a plan is allowed to list no constraints at all.
+- **The harness's scope check** puts the offending **paths** there, which are not constraints in any sense. See "The scope check reuses `ReviewerRejection`" — that reuse exists because the Implementer's corrective action is identical, and the field was the only place the paths could go.
+
+Consistency between the two is not available: one writer has a rubric to quote and the other has a path to report. The **event log** is what distinguishes them — `scope_check_failed` against `review_rejected` — and provenance is a question for the log, not for the Implementer's prompt.
 
 ---
 
@@ -610,18 +644,20 @@ The one honest caveat: `complete_structured` gained a single line — `**self._m
 
 Gemini's free tier is what makes this project runnable without prepaid credits, and its **daily** cap — not its per-minute one — is what limits a debugging session.
 
-**Google no longer publishes a static free-tier table.** The rate-limits page defers to a per-account dashboard, so the numbers are yours to read rather than ours to quote: <https://aistudio.google.com/rate-limit>. What is stable is the shape — free tier is capped on requests per minute, tokens per minute, and **requests per day**, with RPD in the tens-to-low-hundreds depending on model, and `gemini-2.5-flash` more generous than `gemini-2.5-pro`.
+**Google no longer publishes a static free-tier table.** The rate-limits page defers to a per-account dashboard, so the numbers are yours to read rather than ours to quote: <https://aistudio.google.com/rate-limit>. What is stable is the shape — free tier is capped on requests per minute, tokens per minute, and **requests per day**, with RPD in the tens-to-low-hundreds depending on model, and the flash models more generous than the pro ones.
 
 What matters more than the number is the arithmetic against it, and that is exact:
 
 | Run | API calls |
 | --- | --------- |
-| Happy path (plan, one attempt, green) | **2** |
-| One retry, then green | 3 |
-| Five attempts to the cap | **6** |
+| Happy path (plan, one attempt, green) | **3** |
+| One retry, then green | 5 |
+| Five attempts to the cap | **11** |
 | Any of the above, per parse repair | +1 each |
 
-One Planner call plus one Implementer call per attempt. The real Reviewer in 3B adds one per attempt that reaches review, roughly doubling a failing run. So a day's RPD divided by ~6 is the honest ceiling on debugging runs, and a run that dies on a `MAX_TOKENS` at attempt four has still spent five calls.
+One Planner call, then one Implementer call plus one Reviewer call per attempt that reaches review. Attempts caught by the no-edits or scope check cost one call rather than two, since the Reviewer is never reached. The 3B Reviewer roughly doubled a failing run — the numbers above are the post-3B ones. So a day's RPD divided by ~11 is the honest ceiling on debugging runs, and a run that dies on a `MAX_TOKENS` during attempt four has still spent eight calls before it — nine if it got as far as the Reviewer.
+
+**`--stub` costs nothing**, which is the point of it: no client is constructed, so a wiring check is free and works with the daily quota gone.
 
 Two consequences worth designing around:
 
@@ -633,6 +669,72 @@ Two consequences worth designing around:
 `workspace.list_repo_files` and `workspace.read_repo_file`. They live beside `apply_edits` because that module owns the run directory, so the two new agents do not each grow their own `Path` arithmetic and their own idea of which directories to skip.
 
 `read_repo_file` keeps its own containment check rather than sharing one with `apply_edits` — the two raise for different reasons and a reader borrowing the writer's message would misdescribe what went wrong. What they share is `normalize_path`, which is the part that has to agree: a reader accepting a spelling the scope check would reject would show the Implementer a file it is not allowed to edit. The check is reachable, not theoretical — `normalize_path` deliberately does not resolve `..` away, so a plan can name an escaping path in `target_files` and the scope check will accept it. Catching it on the read means it never reaches the write.
+
+---
+
+## The Reviewer
+
+`harness/agents/reviewer.py`, added in 3B. Contract: `plan`, `diff`. Produces `review`. `MAX_TOKENS = 8000` — the output is three small fields, but `reason` carries an attribution walk and thinking is drawn from the same budget. No envelope: unlike `list[FileEdit]`, `ReviewVerdict` is already an object at the schema root.
+
+### What is left for it to judge
+
+By the time the loop reaches step J, three failure modes are already gone: the no-edits check guarantees a non-empty diff, the scope check guarantees every path is inside `target_files`, and the livelock check guarantees the diff is not a repeat. Those are **preconditions, not questions**, and the system prompt says so — a Reviewer re-checking them is spending its one call on work already done.
+
+What survives is everything `target_files` is too coarse to see (it is file-granular; `steps` is function-granular) plus everything that is a property of the change rather than of its location:
+
+- scope creep inside an allowed file — right file, wrong extent
+- a different mechanism reaching the same outcome, the sharpest case being **a fix hardcoded to the values the failing test happens to use**
+- deletions no step called for
+- under-implementation — a step with no hunk
+- violations of `plan.constraints`
+- reformatting, wholesale rewrites, and elided files
+
+The hardcoded-fix case is where invariant 2 stops being a principle and starts paying. Such a change goes green, so everyone downstream of the Tester sees a success. The Reviewer is the only participant positioned to reject it, *because* it has no green light to defer to.
+
+"In scope and faithful to the plan" is too abstract to act on, so the prompt decomposes it into three questions answerable against text: **attribution** (which numbered step accounts for each hunk?), **correspondence** (which hunk carries out each step, and does it do what the step describes?), and **constraints** (does each still hold?). Attribution is bidirectional on purpose — hunk→step catches overreach, step→hunk catches an unfinished change, and only the first is the obvious one.
+
+### It must not review the plan, and that is mechanical
+
+v1 never replans. A rejection routes back to the Implementer, which re-reads the *same* plan from a reset baseline — so a rejection meaning "this plan is wrong" is unactionable by construction, and the only outcomes are a wasted attempt or a livelock halt. The prompt says this with the consequence attached, alongside an explicit not-grounds-for-rejection list: style, plan quality, missing tests, and any doubt that cannot be tied to a line of the diff.
+
+### Guarding against a rubber stamp without inviting false rejections
+
+A model asked "does this diff match this plan" says yes almost every time — and here the honest base rate really is high, since a competent Implementer produced the diff *from* that plan. So "does it ever reject" is not the test. **"Can it reject the thing it is the last line of defence against" is.** Five things do the work:
+
+1. **Bidirectional attribution replaces a judgment with an enumeration.** The unaccounted hunk surfaces as a side effect of doing the task, not as an act of skepticism. A clean diff produces a clean enumeration and an easy approval, so this raises the floor without adding pressure to invent a problem.
+2. **Reason before verdict**, backed by the field order in `ReviewVerdict`. Having written "hunk 3 modifies `apply_discount`, which no step mentions", approving is visibly inconsistent with its own text.
+3. **Both errors named with their real costs.** A false approval reaches disk with only the human left; a false rejection burns one of five attempts and risks a livelock halt. Neither is presented as worse. The operative rule is an evidence standard, not a disposition: *reject for something you can point at in the diff, approve when you cannot.*
+4. **A long not-grounds list.** As long as the skeptical half, deliberately — a model given only reasons to reject will find them.
+5. **The rejection must be actionable.** Because the Implementer retries blind to its own diff, the reason must name a file, a region, and a corrective action. That turns a known weakness into a filter: a model with only vague unease has nothing to write.
+
+Deliberately absent: "be skeptical" framing, "find at least one issue", "when in doubt reject", and a confidence score (no field for it, and no code would read it).
+
+**None of this is measured.** It is argued, not evidenced. The thing that could measure it is Phase 5's fixture — a diff that stays inside `target_files` and is unfaithful — and until that exists, `test_prompts.py` can only check the rendered text, not the judgment.
+
+### An approving reason costs nothing downstream
+
+Only a **rejecting** verdict becomes a `ReviewerRejection` (step J), so an approving verdict's `reason` reaches the event log and nothing else. That is why the prompt can demand a full attribution walk whichever way the model is leaning: on the common path it costs output tokens and a log line, and on the rare one that specificity is exactly what the blind-retrying Implementer needs. There is no retry-prompt bloat to trade against.
+
+### `render_plan` is duplicated, on purpose
+
+`reviewer.render_plan` is a second implementation, not an import of `implementer.render_plan`. Two differences, both following from the difference in role:
+
+- **Steps are numbered and the numbering is load-bearing.** The Implementer numbers them for legibility; the Reviewer is told to *cite* them by number, and its reason becomes the Implementer's retry prompt. The number is the shared address between the two agents.
+- **No section is ever omitted.** The Implementer's renderer drops an empty `Steps:` or `Constraints:` heading, correctly — a bare heading reads as a truncated prompt to someone being told what to do. For a Reviewer, `(none stated)` is *information*: it says the channel is empty rather than that the section was cut, which matters when the instruction is to check each entry in turn.
+
+The alternatives were importing across two agent modules, which couples agents that are supposed to know nothing about each other, or a shared prompt module, which one function does not earn. `test_prompts.py` asserts the two renderings *differ* on an empty plan, so a future convergence fails loudly rather than quietly losing a property.
+
+### The contract stays at `plan` and `diff`
+
+No `repo_path`. `render_diff` uses `difflib`'s default three lines of context, so "did this gut behaviour the plan meant to preserve" is judged through a narrow window — that is a real limit, not an oversight. It is accepted because the residuals listed above are all visible in the diff itself, because full-file replacement on a small fixture file renders nearly the whole file anyway, and because this project's habit is to widen a contract only when it is demonstrably *incoherent* without the field (which the Planner and Implementer were, and this is not).
+
+**Revisit trigger, recorded so the decision can be reopened on evidence rather than on unease:** if Phase 5's unfaithful-diff fixture shows the Reviewer cannot judge without more context, that is the evidence to widen on. Not before.
+
+### A known hole: a plan that targets a test file
+
+Nothing prevents a Planner from putting a test file in `target_files` — the only validator on `Plan` is that the list is non-empty. If it does, the scope check passes an assertion edit straight through, and the Reviewer would *approve* it under a pure faithfulness reading, since the plan asked for it.
+
+**Left unbuilt, deliberately.** The fix does not belong in the Reviewer: rejecting a test edit regardless of what the plan says is the Reviewer enforcing policy rather than fidelity, which is a different job from the one it has. The right fix is a **field validator on `Plan` rejecting test paths in `target_files`**, beside the non-empty one in `state.py` — mechanical, at the boundary, and it fails with a `ValidationError` the repair turn hands straight back to the Planner. Not built in 3B because 3B is the Reviewer, and because the failure has not been observed. Named here so it is a decision rather than an oversight.
 
 ---
 
@@ -652,7 +754,7 @@ A parse failure must not become an agent retry. The loop's `evidence` says *the 
 | -------------- | ----------------------------------------------------------------- |
 | Language       | Python 3.14, no agent framework                                   |
 | LLM transport  | official `google-genai` SDK — see "The one dependency, and where it stops" |
-| LLM model      | `gemini-2.5-flash`, `response_json_schema`, dynamic thinking (default) |
+| LLM model      | `llm.DEFAULT_MODEL` — `gemini-3.6-flash` today, `response_json_schema`, dynamic thinking (default) |
 | State          | Pydantic v2                                                       |
 | Diff rendering | `difflib.unified_diff` over `edits` + baseline                    |
 | Test execution | `subprocess` running `pytest`                                     |
@@ -684,10 +786,10 @@ harness/
   agents/
     base.py         Agent ABC, CONTRACTS table, requires/produces assertion
     stubs.py        scripted stand-ins for the three LLM-backed agents
-    planner.py
-    implementer.py
-    reviewer.py
-    tester.py
+    planner.py      real, 3A
+    implementer.py  real, 3A
+    reviewer.py     real, 3B
+    tester.py       real since phase 1, never stubbed
 tasks/
   fixture_repo_1/   plain directory, no git
     task.json       task_description + failure_input
@@ -715,10 +817,22 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 3 — in progress. 3A done: the LLM client, the real Planner, the real Implementer, and `cli.py`. 3A.1 done: the provider swap.
-**Last completed:** 3A.1 — Anthropic → Gemini, a transport-only change. Suite is **363 tests, all passing, about 170s.**
+**Phase:** 3 — **done.** 3A: the LLM client, the real Planner, the real Implementer, `cli.py`. 3A.1: the provider swap. 3B: the real Reviewer and `--stub`.
+**Last completed:** 3B. Suite is **403 tests, all passing, about 165s.**
 
-**3A.1.** `google-genai==2.19.0` replaces `anthropic` in `requirements.txt`; the key comes from `GEMINI_API_KEY` and the model is `gemini-2.5-flash`. The Anthropic API needs prepaid credits this project does not have. **One source file changed** — see "The transport swap" for what moved inside `harness/llm.py` and what did not move anywhere else, and "Free-tier limits are the real constraint" for the daily-quota arithmetic that now caps how many debugging runs a day holds.
+**3B.** `harness/agents/reviewer.py` (`Reviewer`, `SYSTEM_PROMPT`, `render_plan`, `render_user_message`, `NONE_STATED`), the `ReviewVerdict` field reorder in `state.py`, and `--stub` in `cli.py` (`stub_targets`, `stub_agents`). Tests: `test_prompts.py` grew a Reviewer section (48 → 71) and `test_cli.py` grew a `--stub` section (20 → 37).
+
+All four agents are now real on the default path, so **invariant 1 is satisfied by two independent gates** for the first time — a model's verdict on the diff, then a human's. Everything argued in full above: what is left for the Reviewer to judge once the mechanical checks have run, why it must not review the plan, the five anti-rubber-stamp guards and why none of them is "be skeptical", why an approving reason costs nothing downstream, why `render_plan` is duplicated, and why the contract stays at `plan` + `diff`.
+
+**Two things 3B deliberately left unbuilt**, both recorded above rather than forgotten: a `Plan` validator rejecting test paths in `target_files` (see "A known hole"), and the `repo_path` widening (see "The contract stays at `plan` and `diff`"). Each has a named trigger; neither should be built on unease.
+
+**The model-name drift is fixed, and it had three homes.** `DEFAULT_MODEL` had moved to `gemini-3.6-flash` while this file named `gemini-2.5-flash` twice and `test_llm.py` pinned the literal twice — the two test failures were sitting red before 3B started. Both tests are now bound to the constant, and `test_the_configured_model_id_is_sent` builds its own client with a model nothing else mentions, so it proves the plumbing carries what the caller configured instead of restating a constant. **Do not reintroduce a model literal into a test or into this file**; name `llm.DEFAULT_MODEL` and let the one definition be the one definition.
+
+`test_prompts.py`'s stale `"claude-opus-5"` string is gone too, replaced by `DEFAULT_MODEL` for the same reason: it was an inert invented value that outlived the provider it named by a whole phase.
+
+**A note on running the suite.** It spawns real pytest subprocesses, so **do not run two sessions of it at once.** A concurrent run pushed it from ~200s to 873s and made `test_tester.py`'s 120s Tester timeout fire on a fixture suite that finishes in 0.51s — three unrelated-looking failures that were all contention. If the Tester times out, suspect the machine before the code.
+
+**3A.1.** `google-genai==2.19.0` replaces `anthropic` in `requirements.txt`; the key comes from `GEMINI_API_KEY` and the model is whatever `llm.DEFAULT_MODEL` names. The Anthropic API needs prepaid credits this project does not have. **One source file changed** — see "The transport swap" for what moved inside `harness/llm.py` and what did not move anywhere else, and "Free-tier limits are the real constraint" for the daily-quota arithmetic that now caps how many debugging runs a day holds.
 
 **3A.** `harness/llm.py` (`LLMClient`, `LLMResult`, `extract_json`, `describe_problems`, `repair_prompt`, and the error hierarchy), `harness/agents/planner.py`, `harness/agents/implementer.py`, `cli.py`, plus `workspace.list_repo_files` / `read_repo_file` and a `target_files` validator on `Plan`.
 
@@ -726,7 +840,7 @@ Three test modules, none of which touch the network: `tests/test_llm.py` (71), `
 
 `tests/test_llm.py`'s `client` fixture is **module-scoped**, for the reason `test_loop.py` shares its scenarios: a `genai.Client` costs about a second to construct (it sets up a trust store), and function scope made that module take a minute instead of five seconds. Safe because every test that issues a request replaces `_sdk` outright; a test needing different client *settings* builds its own.
 
-**Every decision from the 3A design pass is argued in full above** — the dependency boundary, `repo_path` in two more contracts, the parse ladder, the repair turn, the failure taxonomy, `LLMResponseError` staying fatal, the `Plan` validator, the entrypoint's shape, and why there is no `--stub` flag yet.
+**Every decision from the 3A design pass is argued in full above** — the dependency boundary, `repo_path` in two more contracts, the parse ladder, the repair turn, the failure taxonomy, `LLMResponseError` staying fatal, the `Plan` validator, and the entrypoint's shape. (3A's "there is no `--stub` flag yet" is now spent; see "`--stub`".)
 
 Two things worth knowing before touching this next:
 
@@ -738,7 +852,9 @@ Two things worth knowing before touching this next:
 
 **Livelock gets rarer from here.** The check is defined over byte-identical rendered diffs, and a real model sampling twice rarely produces them. That does not make the check wrong — it is still the right test for the condition it names — but do not expect real runs to trip it the way `test_loop.py` does.
 
-**Next task: 3B — the real Reviewer.** `reviewer.py` is the last stubbed LLM-backed agent, and the one whose prompt matters most: it reads `plan` and `diff`, never `test_result` (invariant 2), and judges faithfulness and minimality now that the scope check has taken mechanical scope off its plate. Its verdict is `ReviewVerdict`, already an object at the schema root, so it needs no envelope. `--stub` lands with it, meaning "all three LLM-backed agents, or none". Until then `cli.py` approves every diff by script and the human is the only real gate.
+**Next task: Phase 4 — failure evidence packaging, retry with evidence, escalation output.** It also owns the one open question left from 3A: whether `LLMResponseError` deserves a seventh `Status`. Decide that with evidence from real runs.
+
+Worth doing before or alongside it: **a real end-to-end run.** Everything in Phase 3 is tested against fakes, and the whole of 3B's argument about judgment is unmeasured. `--stub` proves the wiring; only a real run against `fixture_repo_1` proves the prompts. Budget ~3 API calls for a green first attempt, ~11 for a run to the cap — see "Free-tier limits are the real constraint".
 
 Previously: 2.3 — `harness/loop.py` (`run_task`, `render_diff`, `MAX_ATTEMPTS`, `LIVELOCK_REASON`), `workspace.apply_edits` and `workspace.normalize_path`, `Status.ESCALATED_BROKEN_SUITE`, `StubApprover`, and `out_of_scope_edits()`. `write_edits` now delegates to `apply_edits`. See "The control loop" above for the whole of it.
 

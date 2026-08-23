@@ -118,10 +118,19 @@ class ReviewVerdict(_Model):
     `violated_constraints` is required with no default. An approving Reviewer has
     to say `[]` explicitly rather than have Pydantic say it on its behalf -- this
     is LLM output, and a silent default would hide a model that omitted the field.
+
+    **`reason` is declared before `approved`, and the order is the point.** This
+    model is handed to the API as `response_json_schema`, and property order in
+    the schema is the order the model emits its fields in. Verdict-first would
+    have it commit to yes or no and then write a justification for a decision
+    already made; reason-first makes it walk the diff against the plan and reach
+    the verdict at the end. That is the cheapest guard there is against a
+    reviewer that approves everything, and it costs nothing: no code reads these
+    fields by position, and `extra="forbid"` and validation are unaffected.
     """
 
-    approved: bool
     reason: str
+    approved: bool
     violated_constraints: list[str]
 
 

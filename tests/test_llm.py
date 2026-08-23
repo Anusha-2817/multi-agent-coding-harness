@@ -27,6 +27,7 @@ from google.genai import errors as genai_errors
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from harness.llm import (
+    DEFAULT_MODEL,
     RETRYABLE_STATUS,
     LLMClient,
     LLMError,
@@ -162,9 +163,13 @@ class TestConstruction:
         assert "GEMINI_API_KEY" in str(caught.value)
 
     def test_the_environment_supplies_the_key_when_no_argument_does(self, monkeypatch):
+        """Bound to `DEFAULT_MODEL` rather than to a literal. The model id is
+        incidental here -- what is under test is the key coming from the
+        environment -- and a literal pinned this test to a model the client had
+        already moved off."""
         monkeypatch.setenv("GEMINI_API_KEY", "from-the-environment")
 
-        assert LLMClient().model == "gemini-2.5-flash"
+        assert LLMClient().model == DEFAULT_MODEL
 
 
 # -- the parse ladder --------------------------------------------------------
@@ -620,12 +625,21 @@ class TestTheRequest:
         assert contents[0].role == "user"
         assert contents[0].parts[0].text == "the user turn"
 
-    def test_the_model_id_is_sent(self, client):
+    def test_the_configured_model_id_is_sent(self):
+        """Its own client with a deliberately non-default model, which the shared
+        fixture's docstring sanctions for a test needing different settings.
+
+        Asserting the default reached the SDK would have restated a constant and
+        pinned the test to whichever model that constant happened to name. A
+        model nothing else in the repo mentions proves the plumbing carries what
+        the caller configured.
+        """
+        client = LLMClient(api_key="test-key-not-used", model="some-other-model")
         sdk = with_sdk(client, envelope('{"name": "a", "count": 1}'))
 
         client.complete_structured(system="s", user="u", schema=Shape, max_tokens=100)
 
-        assert sdk.calls[0]["model"] == "gemini-2.5-flash"
+        assert sdk.calls[0]["model"] == "some-other-model"
 
 
 class TestTheResult:
