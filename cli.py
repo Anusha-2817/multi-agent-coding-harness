@@ -44,6 +44,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from textwrap import indent
 
 from harness.agents.base import Agent
 from harness.agents.implementer import Implementer
@@ -54,7 +55,16 @@ from harness.agents.tester import Tester
 from harness.events import EventLog
 from harness.llm import LLMClient, LLMError
 from harness.loop import MAX_ATTEMPTS, run_task
-from harness.state import FileEdit, Plan, ReviewVerdict, Status, TaskState, make_task_id
+from harness.state import (
+    Evidence,
+    FileEdit,
+    Plan,
+    ReviewerRejection,
+    ReviewVerdict,
+    Status,
+    TaskState,
+    make_task_id,
+)
 from harness.workspace import list_repo_files, prepare_run_dir, read_repo_file
 
 RULE = "=" * 78
@@ -195,24 +205,347 @@ def terminal_approval(diff: str) -> bool:
         print("please answer y or n.")
 
 
-def report(state: TaskState) -> None:
+# -- the escalation output ---------------------------------------------------
+#
+# Phase 4. A run used to end by printing five lines; four of the five terminal
+# statuses are failures with different causes, and `escalated_retry_limit` on its
+# own tells a human nothing about which file to open.
+#
+# **This is the project's first reader of the event log**, and that is a decision
+# rather than a drift. `EventLog` stays single-method: append-only constrains
+# *mutation* -- no update, no delete, no rewriting history -- and says nothing
+# about reading a finished file back. CLAUDE.md's own claim that "a run's log is
+# self-contained and replayable on its own" is an invitation to read it. The
+# reader lives here, in the presentation layer, rather than as `EventLog.read`,
+# so the writer keeps the shape invariant 6 gave it.
+#
+# What has to come from the log is exactly one thing: **the per-attempt outcome
+# history**. `TaskState.evidence` is the single most recent failure, never a
+# history, and that is deliberate -- so a five-attempt escalation cannot say what
+# the first four attempts died of without reading the events back. Everything
+# else comes from the terminal state, which is intact at the halt because `_halt`
+# fires before the next attempt's clear at step B.
+
+
+#: The four branch events, one of which every continuing attempt writes exactly
+#: once. A retry-limit halt therefore has exactly MAX_ATTEMPTS of them.
+OUTCOME_EVENTS = (
+    "no_edits_produced",
+    "scope_check_failed",
+    "review_rejected",
+    "test_failed",
+)
+
+#: The only outcome that got past the apply step. Everything else was caught
+#: upstream of it, so the run directory is still the pristine baseline.
+APPLIED_OUTCOME = "test_failed"
+
+
+def read_events(log_path: str | Path) -> list[dict]:
+    """The run's events, oldest first. Unreadable lines are skipped, not raised.
+
+    The mirror of `EventLog.append`'s own rule: a logging bug degrades one line
+    and never kills a run. A *reporting* bug must not turn a completed run into a
+    traceback either -- the run is over and its outcome is already on disk, so a
+    half-readable log should cost detail, not the report.
+    """
+    events: list[dict] = []
+    try:
+        lines = Path(log_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return events
+
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            events.append(record)
+    return events
+
+
+def _first_line(text: str) -> str:
+    stripped = text.strip()
+    return stripped.splitlines()[0] if stripped else ""
+
+
+def _outcome_detail(event: str, payload: dict) -> str:
+    """One line naming what this attempt actually died of.
+
+    Short on purpose: the ledger is a shape you read at a glance -- five
+    `test_failed` rows and five `scope_check_failed` rows send you to completely
+    different files -- and the last failure is printed in full further down.
+    """
+    if event == "scope_check_failed":
+        return ", ".join(payload.get("paths", []))
+    if event == "review_rejected":
+        return _first_line(payload.get("reason", ""))
+    if event == "test_failed":
+        failed = payload.get("failed_tests", [])
+        if not failed:
+            return f"exit code {payload.get('exit_code')}, no test named"
+        more = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
+        return f"{failed[0]}{more}"
+    return ""  # no_edits_produced has no payload, and needs none
+
+
+def attempt_ledger(events: list[dict]) -> list[tuple[int, str, str]]:
+    """`(attempt, event, detail)` for every attempt that failed and routed back.
+
+    The one thing in this module that the terminal state cannot answer. Ordered
+    as the log is, which is the order the attempts happened.
+    """
+    return [
+        (event["attempt"], event["event"], _outcome_detail(event["event"], event["payload"]))
+        for event in events
+        if event.get("event") in OUTCOME_EVENTS
+    ]
+
+
+def rendered_attempt(events: list[dict], diff: str) -> int | None:
+    """Which attempt first rendered `diff`, from the `diff_rendered` events.
+
+    **Not** `previous_diffs.index(diff) + 1`, and the difference is not
+    theoretical -- it was confirmed against a real three-attempt run before this
+    was written. An attempt caught at the no-edits or scope check never reaches
+    the render, so it adds no entry to `previous_diffs`; if such an attempt comes
+    *before* the diff that is later duplicated, the index sits below the attempt
+    number that produced it. A scope failure on attempt 1 followed by identical
+    diffs on attempts 2 and 3 gives `index + 1 == 1` for a diff attempt 2 wrote.
+
+    The log does not drift, because `diff_rendered` carries its own `attempt`.
+    """
+    for event in events:
+        if event.get("event") == "diff_rendered" and event["payload"].get("diff") == diff:
+            return event["attempt"]
+    return None
+
+
+def _run_finished_reason(events: list[dict]) -> str:
+    """The halt reason `_halt` wrote. It lives in the log and nowhere else.
+
+    `run_finished` appears exactly once per run, because every exit goes through
+    `_halt`. Read from the end anyway -- the cost is nothing and it does not
+    depend on that staying true.
+    """
+    for event in reversed(events):
+        if event.get("event") == "run_finished":
+            return event["payload"].get("reason", "")
+    return ""
+
+
+def _heading(title: str) -> None:
+    print(f"\n{title}\n{'-' * len(title)}")
+
+
+def _block(text: str) -> None:
+    """Print an indented block. Uncapped, deliberately.
+
+    A traceback truncated above its assertion line is worse than a long one, and
+    this is the output a human reads *instead of* opening the log.
+
+    The `lambda` overrides `indent`'s default of skipping whitespace-only lines,
+    and that is load-bearing for a diff: a blank context line is a single space,
+    so the default would leave it two columns left of the lines around it and put
+    a visible kink in the one artifact the human is being asked to judge.
+    """
+    print(indent(text.rstrip("\n"), "  ", lambda _: True))
+
+
+def _print_plan(plan: Plan | None) -> None:
+    """The plan, when the plan is the suspect.
+
+    Printed for the retry limit and for livelock, and for neither of the other
+    two: a broken suite is the Implementer emitting something unparseable, and a
+    human refusal is not about the plan at all.
+    """
+    if plan is None:
+        return
+    _heading("Plan under suspicion")
+    print(f"  summary  {plan.summary}")
+    print("  targets  " + ", ".join(plan.target_files))
+
+
+def _print_evidence(evidence: Evidence) -> None:
+    """The last failure in full, rendered by kind -- not just `evidence.kind`.
+
+    Deliberately not shared with `implementer.render_evidence`. That one is a
+    prompt: it speaks to the model in the second person and carries the reset
+    notice, both of which would be nonsense here. Same data, different reader.
+    """
+    _heading(f"Last failure ({evidence.kind})")
+
+    if isinstance(evidence, ReviewerRejection):
+        _block(evidence.reason)
+        if evidence.violated_constraints:
+            print("\n  violated:")
+            for item in evidence.violated_constraints:
+                print(f"    - {item}")
+        return
+
+    for nodeid in evidence.failed_tests:
+        print(f"  - {nodeid}")
+    if evidence.traceback:
+        print()
+        _block(evidence.traceback)
+
+
+def _print_retry_limit(state: TaskState, events: list[dict]) -> None:
+    """Five diffs, none green. The ledger is the whole point of this branch."""
+    ledger = attempt_ledger(events)
+
+    if ledger:
+        _heading("Attempt ledger")
+        width = max(len(event) for _, event, _ in ledger)
+        for attempt, event, detail in ledger:
+            print(f"  {attempt}  {event:<{width}}  {detail}".rstrip())
+
+        # What is actually sitting in the run directory, derived from the last
+        # row. The reset happens at the *top* of an attempt, so the final
+        # attempt's work is still on disk if it got as far as apply -- and is not
+        # there at all if it was caught upstream. Worth stating rather than
+        # leaving a human to guess which of the two they are looking at.
+        attempt, last, _ = ledger[-1]
+        if last == APPLIED_OUTCOME:
+            print(
+                f"\n  On disk: attempt {attempt}'s edits are applied in the run "
+                "directory -- the suite ran against them and failed."
+            )
+        else:
+            print(
+                f"\n  On disk: nothing. Attempt {attempt} was caught before the "
+                "apply step, so the run directory is the untouched baseline."
+            )
+
+    _print_plan(state.plan)
+    if state.evidence is not None:
+        _print_evidence(state.evidence)
+
+
+def _print_livelock(state: TaskState, events: list[dict]) -> None:
+    """Two attempts, one diff. The diff is the entire evidence."""
+    first = rendered_attempt(events, state.diff or "")
+    if first is not None:
+        print(
+            f"\nAttempt {state.attempt_count} rendered a diff byte-identical to "
+            f"attempt {first}'s."
+        )
+
+    _print_plan(state.plan)
+
+    if state.diff:
+        _heading("The repeated diff")
+        _block(state.diff)
+
+    print(
+        "\n  v1 does not replan, so the loop cannot route this back to the "
+        "Planner. The plan above is the thing to change."
+    )
+
+
+def _print_broken_suite(state: TaskState) -> None:
+    """pytest could not collect. No evidence is read here, and that is checked.
+
+    The loop writes no `evidence` on this path -- `test_no_evidence_is_written`
+    asserts it -- so a reporter that printed `state.evidence` unconditionally
+    would show an *earlier* attempt's failure as though it caused this halt.
+    """
+    result = state.test_result
+    if result is not None:
+        _heading("What pytest said")
+        print(f"  exit code  {result.exit_code}")
+        if result.traceback:
+            print()
+            _block(result.traceback)
+
+    if state.diff:
+        _heading("The diff that broke it")
+        _block(state.diff)
+
+    print(
+        f"\n  On disk: these edits are applied in {state.repo_path}, which is "
+        "where the unparseable file can be opened."
+    )
+
+
+def _print_aborted(state: TaskState) -> None:
+    """A human said no. Nothing reached disk.
+
+    `state.review` is printed here, and it closes an open question rather than
+    reopening one: CLAUDE.md notes that an approving verdict's `reason` otherwise
+    reaches the event log and nothing else. Showing it to the person who just
+    refused the diff gives them the model's case for it -- which is what widening
+    the gate to `approve(diff, review)` would have bought, without widening
+    anything. The gate still takes the diff alone; the report reads the verdict
+    afterwards, off a state field that is still populated because `_halt` fires
+    before the next attempt's clear.
+    """
+    if state.review is not None:
+        _heading("What the Reviewer had said about it")
+        _block(state.review.reason)
+
+    if state.diff:
+        _heading("The diff you refused")
+        _block(state.diff)
+
+    print(
+        f"\n  On disk: nothing. The apply step never ran, so {state.repo_path} is "
+        "the untouched baseline."
+    )
+
+
+def _print_succeeded(state: TaskState) -> None:
+    """Green. The only interesting extra fact is whether it took a retry.
+
+    `evidence` surviving into a `succeeded` state is not a leak -- see CLAUDE.md,
+    "evidence survives; that is the point". Every attempt that routes back writes
+    evidence before it does, so the surviving one is always the immediately
+    preceding attempt's, which is why the attempt number can be named rather than
+    looked up.
+    """
+    if state.evidence is not None:
+        print(
+            f"\nRecovered from a {state.evidence.kind} on attempt "
+            f"{state.attempt_count - 1}."
+        )
+
+
+def report(state: TaskState, log_path: str | Path) -> None:
     """What a finished run says on the way out.
 
-    Deliberately plain. Four of the five terminal statuses are failures with
-    different causes, and packaging them properly is Phase 4's job -- anything
-    more here would be a second implementation to throw away.
+    Takes the log path rather than deriving `logs/<task_id>.jsonl`, so a caller
+    that put its log somewhere else -- every test does -- reads the log it wrote.
+
+    The header is common to all six statuses; below it, each terminal status gets
+    the one thing a human needs next. The exit code does not vary: every
+    non-success is 1, including `aborted_by_human`, which is the gate working
+    rather than a distinct kind of outcome worth encoding in a shell.
     """
+    events = read_events(log_path)
+
     print(f"\n{RULE}")
     print(f"status        {state.status.value}")
     print(f"attempts      {state.attempt_count} of {MAX_ATTEMPTS}")
     print(f"run directory {state.repo_path}")
-    print(f"event log     logs/{state.task_id}.jsonl")
-
-    if state.evidence is not None:
-        # Present even on a success, and that is not a leak: it is what the run
-        # recovered from. See CLAUDE.md, "evidence survives; that is the point".
-        print(f"last failure  {state.evidence.kind}")
+    print(f"event log     {log_path}")
+    reason = _run_finished_reason(events)
+    if reason:
+        print(f"reason        {reason}")
     print(RULE)
+
+    if state.status is Status.ESCALATED_RETRY_LIMIT:
+        _print_retry_limit(state, events)
+    elif state.status is Status.ESCALATED_LIVELOCK:
+        _print_livelock(state, events)
+    elif state.status is Status.ESCALATED_BROKEN_SUITE:
+        _print_broken_suite(state)
+    elif state.status is Status.ABORTED_BY_HUMAN:
+        _print_aborted(state)
+    elif state.status is Status.SUCCEEDED:
+        _print_succeeded(state)
+
+    print(f"\n{RULE}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -292,7 +625,7 @@ def main(argv: list[str] | None = None) -> int:
         approve=terminal_approval,
     )
 
-    report(final)
+    report(final, event_log.path)
     return 0 if final.status is Status.SUCCEEDED else 1
 
 

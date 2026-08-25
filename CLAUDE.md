@@ -63,10 +63,12 @@ Build order. Phases 1–2 make **zero API calls**.
 | 1 | `TaskState` + all models, `EventLog`, fixture repo 1, Tester, unit tests | done |
 | 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), the approval gate and apply step, scripted failure tests | in progress — 2.1, 2.2, 2.3 done |
 | 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | done — 3A (client, Planner, Implementer, `cli.py`), 3A.1 (Anthropic → Gemini), 3B (Reviewer, `--stub`) |
-| 4 | Failure evidence packaging, retry with evidence, escalation output | |
+| 4 | Failure evidence packaging, retry with evidence, escalation output | in progress — evidence packaging and retry-with-evidence were already built in 2.3/3A; 4A adds the escalation output |
 | 5 | Fixture repos 2–3, Reviewer-rejection scenario, saved transcripts, README update | |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
+
+See also "Fixture design: the recoverability constraint" — Phase 5 now owes **two** fixtures with different jobs, and this is only one of them.
 
 That fixture is now carrying two questions, not one. It is the only thing that can show whether the 3B prompt's anti-rubber-stamp guards actually fire, and it is the **revisit trigger** for the Reviewer's `plan`+`diff` contract — see "The Reviewer". Both were argued rather than measured, and both should be decided on what that fixture produces.
 
@@ -579,6 +581,106 @@ Two rules shape the set. **Every halt goes through `_halt`**, so `run_finished` 
 
 ---
 
+## The escalation output
+
+`cli.report(state, log_path)`. Phase 4. A run used to end by printing five lines and `evidence.kind`; four of the five terminal statuses are failures with different causes, and `escalated_retry_limit` on its own tells a human nothing about which file to open.
+
+It lives in `cli.py`, not in the loop. `run_task` returns a terminal state and every one of `test_loop.py`'s assertions is against that state — a loop that printed would need `capsys` in all of them. The loop decides; the report says. `test_cli.py` already owned `TestTheReport`, so the seam was already drawn in the right place.
+
+**It takes the log path rather than deriving `logs/<task_id>.jsonl`.** Every test writes its log under a temp directory, and a reporter that reconstructed the path from `task_id` would read a different file than the run wrote — or no file at all.
+
+### The first log reader, and why that is not a breach
+
+`report` reads the run's JSONL back with `json.loads`. Nothing in this project had ever read the log before.
+
+`EventLog` **stays single-method**. "Append-only" constrains *mutation* — no update, no delete, no rewriting history — and says nothing about reading a finished file. CLAUDE.md's own claim that "a run's log is self-contained and replayable on its own" is an invitation to read it; a log nothing may read is a log that proves nothing. The reader lives in `cli.py` rather than as `EventLog.read` so the writer keeps exactly the shape invariant 6 gave it, and so the parsing sits in the presentation layer where a change to it cannot reach a run.
+
+**Exactly one thing has to come from the log: the per-attempt outcome history.** `evidence` is the single most recent failure, never a history — deliberately — so a five-attempt escalation cannot say what the first four attempts died of without reading the events back. The alternative was putting an outcome list on `TaskState`, which is precisely the history that field refuses to keep.
+
+Everything else comes from the terminal state, and is there because **`_halt` fires before the next attempt's clear at step B**. `diff`, `review`, and `test_result` are all still populated at a halt.
+
+`read_events` skips unreadable lines instead of raising, mirroring `EventLog.append`'s own rule in the other direction: a logging bug degrades one line and never kills a run, so a reporting bug must not turn a finished run into a traceback. The run is over and its outcome is already on disk; a half-readable log should cost detail, not the report.
+
+### What each status prints
+
+A common header for all six — status, attempts, run directory, event log, and the halt `reason`. That reason is the one header field read from the log: `_halt` writes it into `run_finished` and there is no `reason` field on `TaskState`.
+
+| Status | What it adds | Sourced from |
+| ------ | ------------ | ------------ |
+| `escalated_retry_limit` | attempt ledger, what is on disk, the plan, the last failure in full | **log** (ledger) + state |
+| `escalated_livelock` | which attempt the diff duplicated, the plan, the repeated diff | **log** (attempt number) + state |
+| `escalated_broken_suite` | pytest's exit code and traceback, the diff that broke it | state only |
+| `aborted_by_human` | the Reviewer's verdict, the diff refused | state only |
+| `succeeded` | `Recovered from a <kind> on attempt N-1`, when evidence survived | state only |
+
+`_print_evidence` is deliberately **not** shared with `implementer.render_evidence`. That one is a prompt: second person, and it carries `RESET_NOTICE`. Same data, different reader.
+
+**The exit code does not vary.** Every non-success is 1, `aborted_by_human` included — that is the gate working, not a distinct kind of outcome worth encoding in a shell.
+
+### The attempt ledger
+
+One row per attempt that routed back: attempt number, branch event, one line of detail. The four branch events — `no_edits_produced`, `scope_check_failed`, `review_rejected`, `test_failed` — are written exactly once by every continuing attempt, so a retry-limit halt has exactly `MAX_ATTEMPTS` rows.
+
+The detail is short on purpose. The ledger is a *shape* read at a glance: five `test_failed` rows and five `scope_check_failed` rows send you to completely different files, and the last failure is printed in full underneath. A rejection row is the **first line** of the reason, because a real Reviewer's reason is an attribution walk several lines long.
+
+**The last row says what is on disk**, and this is worth printing rather than leaving to be guessed. The reset is at the *top* of an attempt, so the final attempt's work survives the halt if it reached apply — and is not there at all if it was caught upstream. `test_failed` is the only outcome past the apply step; everything else means the run directory is the untouched baseline. The two states look identical from outside.
+
+### Livelock's attempt number comes from `diff_rendered`
+
+**Not `previous_diffs.index(diff) + 1`.** That arithmetic is wrong, and the drift was confirmed against a real three-attempt run before the rendering was written, not reasoned about:
+
+```
+attempt 1  out-of-scope edit   → caught at F, renders nothing
+attempt 2  failing_edits(1)    → renders D, appended
+attempt 3  failing_edits(1)    → renders D again, livelock
+
+previous_diffs.index(D) + 1 == 1        # wrong
+diff_rendered events carry attempt 2    # right
+```
+
+An attempt caught at the no-edits or scope check never reaches the render, so it contributes no entry to `previous_diffs`. If such an attempt comes *before* the diff that is later duplicated, the index sits below the attempt number that produced it. The log does not drift, because `diff_rendered` carries its own `attempt`. Pinned in `TestTheLivelockAttemptNumber` so the shortcut cannot come back as a simplification.
+
+### The refusal rendering prints `state.review`, and that closes a question
+
+CLAUDE.md has noted since 3B that an **approving** verdict's `reason` reaches the event log and nothing else. At the human-refusal halt it is still on state, so the report shows the person who just said no the model's case for the diff they refused.
+
+This **closes the "widen `approve()` to `(diff, review)`" question without widening anything.** The gate still receives the diff alone, per the ownership table; the verdict is read off state *after* the halt. What the widening would have bought — the human seeing the verdict — is bought here for free, and the callback is still built before `run_task` runs and before any verdict exists. The question is settled, not deferred: do not reopen it on this motivation.
+
+### The broken-suite rendering never prints `evidence`
+
+The loop writes none on that path — `test_no_evidence_is_written` asserts it — so a reporter that printed `state.evidence` unconditionally would show an **earlier attempt's** failure as though it caused this halt. `test_a_broken_suite_never_prints_evidence` builds a state carrying a stale `TesterFailure` precisely to prove it stays hidden.
+
+### Two renderings are covered without a real run, and that is sufficient
+
+`--stub` reaches `escalated_retry_limit` and `aborted_by_human`, so both are driven end to end through `main` with no API key — the ledger there is assembled from a log five real attempts actually wrote.
+
+`escalated_livelock` and `escalated_broken_suite` are **not reachable from a stub run**, and both omissions are structural: `stub_agents` scripts a distinct marker per attempt precisely so the run does not livelock, and the stub edit is an appended comment, which always parses. They are driven instead through `test_loop.py`'s `run_scenario` — a real `run_task`, a real reset, a real pytest, and a terminal state the loop built rather than one a test typed out.
+
+**That is enough, and the reason is worth stating rather than apologising for:** neither rendering reads anything a model produced. Livelock is a byte comparison over rendered diffs; broken-suite is a pytest exit code. What a real run would add over a scripted one is a network call and nothing else. The two renderings that depend on a real run are the two that meet a human on the default path, and those are the ones driven through `main`.
+
+`test_cli.py` imports `run_scenario` from `test_loop` for this. Cross-module, and acceptable: `tests/` is on `sys.path` under pytest's `prepend` import mode, and the alternative was a third copy of the scenario plumbing.
+
+### `_block` overrides `textwrap.indent`'s default
+
+`indent` skips whitespace-only lines unless given a predicate, and a diff's blank context line is a single space. At the default it lands two columns left of everything around it and puts a visible kink in the one artifact a human is being asked to judge. Blocks are otherwise **uncapped** — a traceback truncated above its assertion line is worse than a long one, and this output is what a human reads *instead of* opening the log.
+
+---
+
+## Fixture design: the recoverability constraint
+
+**With no replanning, the only recoverable failure is one where the plan is right and the implementation is wrong.**
+
+This falls out of two decisions that are already made and are not being revisited: the Planner runs **once**, outside the retry loop, and every attempt resets to an identical baseline. So a retry re-reads the *same* plan against the *same* files. If the plan is what is wrong, no number of attempts can fix it — the run burns to the cap or halts on livelock, and the log reads as though the Implementer kept failing at something the plan made unreachable.
+
+**This governs every future fixture.** A fixture whose difficulty lives in the *task description* — anything that misleads the Planner — cannot produce a fail-then-recover run. It can only produce an unrecoverable one. The difficulty has to live where a retry can reach it: in the gap between a correct plan and a first implementation of it.
+
+Two consequences already recorded elsewhere and worth reading together with this:
+
+- **`fixture_repo_1` cannot be made to fail on attempt 1 by editing `task.json`.** `implementer.render_current_files` puts the complete contents of every `target_files` entry in the prompt, so the model reads `tier_for` with its docstring saying "inclusive lower bounds" directly above a `>`. No description-level misdirection survives that, because the misdirection is not what the Implementer is looking at. Misdirection can only bite by poisoning the plan — and a poisoned plan is unrecoverable by the rule above.
+- **Phase 5's fixture list carries two distinct requirements, not one.** An unfaithful-in-scope diff to exercise the Reviewer's judgment (recorded under "The Reviewer"), and an Implementer trap to exercise the retry path. They should probably not be the same repo: a run that trips both tells you nothing about either.
+
+---
+
 ## The LLM client
 
 `harness/llm.py`. One public method, `complete_structured(system=, user=, schema=, max_tokens=) -> LLMResult`: text in, validated Pydantic object out. Agents hold one as a constructor dependency, exactly as the Tester holds its `timeout`.
@@ -624,7 +726,9 @@ The last two rows are the ones worth stating. A truncated response would truncat
 
 It propagates out of `_run`, out of `run_task`, and ends the run in a stack trace rather than a `Status` — like `AgentContractError`. A model that cannot emit its own schema twice is neither a task outcome (no diff was produced to judge) nor recoverable by another attempt.
 
-A seventh `Status` is **deliberately deferred to Phase 4**, which owns escalation output. `escalated_broken_suite` earned its place because the other two escalations would have been lies about a condition the loop reaches on a normal path; this one is rare, and a stack trace naming the raw text is more useful than a status value. Adding one now would be justified by a guess about frequency.
+A seventh `Status` was **deferred to Phase 4**, which owns escalation output. `escalated_broken_suite` earned its place because the other two escalations would have been lies about a condition the loop reaches on a normal path; this one is rare, and a stack trace naming the raw text is more useful than a status value. Adding one would be justified by a guess about frequency.
+
+**Phase 4 kept it deferred, and recorded the first real evidence rather than resolving on it.** The first end-to-end run with all four agents real returned `parse_attempts: 1` on all three calls, `stop_reason: STOP`, and fired no repair turn — one data point *toward* the condition being rare, and nowhere near enough to overturn the argument above. One green run is evidence about one green run. Revisit when a real run has actually raised `LLMResponseError`, and let its frequency, not its possibility, decide.
 
 ### The transport swap
 
@@ -817,8 +921,14 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 3 — **done.** 3A: the LLM client, the real Planner, the real Implementer, `cli.py`. 3A.1: the provider swap. 3B: the real Reviewer and `--stub`.
-**Last completed:** 3B. Suite is **403 tests, all passing, about 165s.**
+**Phase:** 4 — **in progress.** 4A: the escalation output. Still owed: the fail-then-recover run against a real model, which needs `tasks/fixture_repo_2/`.
+**Last completed:** 4A. Suite is **432 tests, all passing, about 195s.**
+
+**4A — the escalation output.** `cli.report` now takes `(state, log_path)` and renders each terminal status differently: an attempt ledger and a what-is-on-disk line for `escalated_retry_limit`, the duplicated diff and the attempt it came from for `escalated_livelock`, pytest's exit code and traceback for `escalated_broken_suite`, the Reviewer's verdict and the refused diff for `aborted_by_human`, and `Recovered from a <kind> on attempt N-1` for a `succeeded` run that took a retry. New in `cli.py`: `read_events`, `attempt_ledger`, `rendered_attempt`, `OUTCOME_EVENTS`, `APPLIED_OUTCOME`. `test_cli.py` grew 37 → 66. Everything argued in full under "The escalation output".
+
+**What Phase 4 did *not* have to build.** Evidence packaging and retry-with-evidence were already there — `tester_failure_from` and three `ReviewerRejection` sites in `loop.py` from 2.3, `render_evidence` and `RESET_NOTICE` in `implementer.py` from 3A. Phase 4's real content was the third item in its title.
+
+**The one thing still unexercised is the retry against a real model.** No model has ever received a `TesterFailure` or a `ReviewerRejection` in its prompt: `fixture_repo_1` gets fixed on attempt 1 every time, so `render_evidence` has never produced a byte a model read, and `RESET_NOTICE` — the load-bearing sentence stopping a model from making an incremental edit on a baseline that never held its fix — is still an argued claim rather than a measured one. That is what `tasks/fixture_repo_2/` is for; see "Fixture design: the recoverability constraint" for what shape it has to be, and budget ~5 API calls for the run (1 Planner + 2 × (Implementer + Reviewer)).
 
 **3B.** `harness/agents/reviewer.py` (`Reviewer`, `SYSTEM_PROMPT`, `render_plan`, `render_user_message`, `NONE_STATED`), the `ReviewVerdict` field reorder in `state.py`, and `--stub` in `cli.py` (`stub_targets`, `stub_agents`). Tests: `test_prompts.py` grew a Reviewer section (48 → 71) and `test_cli.py` grew a `--stub` section (20 → 37).
 
@@ -888,4 +998,6 @@ Conventions worth not re-litigating: `None` means "not yet produced" and is what
 
 Phases 1–2 made zero API calls and that held. Phase 3 is the first one that does not — and the whole test suite still makes none: the SDK is faked wherever it is reached for, and no test needs an API key.
 
-**Open questions:** whether `LLMResponseError` deserves a seventh `Status`. Deferred to Phase 4 on purpose — see "LLMResponseError is fatal, for now". Decide it with evidence from real runs, not before.
+**Open questions:** whether `LLMResponseError` deserves a seventh `Status`. **Still deferred after Phase 4**, deliberately. The first all-real run produced `parse_attempts: 1` on all three calls and fired no repair turn — recorded as evidence *toward* the condition being rare, not as a resolution. One green run is evidence about one green run. See "LLMResponseError is fatal, for now".
+
+**Settled in Phase 4, so do not reopen on the old motivation:** widening the gate to `approve(diff, review)`. The refusal rendering prints `state.review` after the halt, which buys what the widening was for while leaving the ownership table and `run_task`'s signature untouched. See "The refusal rendering prints `state.review`".
