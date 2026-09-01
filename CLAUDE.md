@@ -64,7 +64,7 @@ Build order. Phases 1–2 make **zero API calls**.
 | 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), the approval gate and apply step, scripted failure tests | in progress — 2.1, 2.2, 2.3 done |
 | 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | done — 3A (client, Planner, Implementer, `cli.py`), 3A.1 (Anthropic → Gemini), 3B (Reviewer, `--stub`) |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | in progress — evidence packaging and retry-with-evidence were already built in 2.3/3A; 4A adds the escalation output |
-| 5 | Fixture repos 2–3, Reviewer-rejection scenario, saved transcripts, README update | |
+| 5 | Fixture repo 3, Reviewer-rejection scenario, saved transcripts, README update — `fixture_repo_2` moved into Phase 4, which needed it for the recovery run | |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
 
@@ -679,6 +679,48 @@ Two consequences already recorded elsewhere and worth reading together with this
 - **`fixture_repo_1` cannot be made to fail on attempt 1 by editing `task.json`.** `implementer.render_current_files` puts the complete contents of every `target_files` entry in the prompt, so the model reads `tier_for` with its docstring saying "inclusive lower bounds" directly above a `>`. No description-level misdirection survives that, because the misdirection is not what the Implementer is looking at. Misdirection can only bite by poisoning the plan — and a poisoned plan is unrecoverable by the rule above.
 - **Phase 5's fixture list carries two distinct requirements, not one.** An unfaithful-in-scope diff to exercise the Reviewer's judgment (recorded under "The Reviewer"), and an Implementer trap to exercise the retry path. They should probably not be the same repo: a run that trips both tells you nothing about either.
 
+### fixture_repo_2 — the naive-fix trap
+
+Built in Phase 4, ahead of its row in the phase table, because the recovery run needs it. `tasks/fixture_repo_2/` is a `billing` package: `money.py` (shared rounding), `tax.py`, `commission.py`, `invoices.py`. Twenty tests, exactly one red at baseline, its own `pytest.ini`, and a `failure_input` captured by running the suite.
+
+**The bug.** `commission_for` delegates to `money.apply_rate`, which rounds `ROUND_HALF_UP` via `to_cents`. Commission is money leaving the business and must be **truncated** — a sale of 123.45 at 7.5% is 9.258750, which pays 9.26 and should pay 9.25. `test_commission.py::test_a_partial_cent_is_not_paid_out` is the one red test.
+
+**Why the naive fix is not merely tempting but rational.** `render_current_files` shows the Implementer only `plan.target_files`. With the plan naming `billing/money.py` and `billing/commission.py`, `apply_rate` appears to have exactly one caller — `tax.py` is not in the prompt at all. Flipping the shared rounding constant is provably safe from everything the model can see, and it is *one token*, against a correct fix that adds a function and rethreads a call. The Implementer's own system prompt — "Make the smallest change that satisfies the plan" — points directly at the trap.
+
+**Proven mechanically before any call was spent.** Applying the naive fix to a copy:
+
+| | baseline | naive fix | correct fix |
+| --- | --- | --- | --- |
+| `test_commission.py` | 4 pass, **1 fail** | 5 pass | 5 pass |
+| `test_money.py::test_rounds_half_up` | pass | **fail** | pass |
+| `test_tax.py::test_a_half_cent_of_tax_rounds_up` | pass | **fail** | pass |
+| total | 1 failed, 19 passed | 2 failed, 18 passed | **20 passed** |
+
+Two siblings go red, not one, because `apply_rate` delegates to `to_cents` — so *every* route to changing the shared default trips a test the Implementer never saw. The correct fix passing all twenty is the half that proves the fixture is **recoverable**: the trap would be worthless if attempt 2 could not get out of it.
+
+**The retry is well-supplied**, verified by running the real Tester over the naive-fix state and rendering `render_evidence` on the result. The Implementer receives both nodeids and both tracebacks with exact expected-versus-actual. This is the first time `_render_test_failure` will tell a model something it could not have known.
+
+**What the fixture actually measures.** `planner._is_test_file` deliberately hides test bodies, because showing them invites editing the assertion. The cost of that decision is that a specification living only in a sibling test is invisible to the agent that must satisfy it. `test_tax.py` is the only place the tax-rounds-up rule is written down; nothing in `money.py` or `tax.py` states it. So this fixture measures the harness's own self-inflicted blind spot rather than an invented one.
+
+**`task_description` states the constraint truthfully** — "Everything the customer is billed is currently correct and must stay that way" — and is not a hint that defuses the trap. The information is present; acting on it requires seeing `tax.py`, which the Implementer cannot. A run that fails anyway is a fair finding, not a gotcha.
+
+### The ruling: never engineer a fixture to blind the Planner
+
+The Planner **does** see `tax.py` — it is shown every non-test source file. So it may notice `apply_rate` has two callers and write a constraint like *"do not change `apply_rate`'s default rounding"*. If it does, the Implementer gets it right first try, the run goes green in 3 calls, and no retry happens.
+
+**When that happens, do not move `tax.py` behind indirection to hide the sharing.** That is a standing ruling, not a preference for this fixture.
+
+A fixture engineered to blind the Planner measures nothing real. It would be tuning the repository until the harness fails, which inverts what a fixture is for: the fixture is the fixed thing and the harness is what is under test. A trap that only works because the Planner was denied information it would have had in any real repository tells you about the trap, not about the loop.
+
+If the Planner rescues the run, **record it as a finding — the Planner earned its keep**, which is itself unmeasured today — and then choose deliberately between two honest options:
+
+- **Accept the 3-call green run** as a second happy-path data point, and find another way to exercise the retry.
+- **Design a different trap where the constraint genuinely is not discoverable from the repo** — not hidden from one agent, but absent from the source for everyone, the way a rule that lives only in a test suite already is.
+
+The distinction is between a constraint that is *undiscoverable* and one that is *withheld*. The first is a real property of a codebase. The second is a rigged demo.
+
+**This principle governs every future fixture**, alongside the recoverability constraint above. Together they bound the design space: the difficulty must sit between a correct plan and a first implementation of it (recoverability), and it must be a real property of the repository rather than an artifact of what each agent was shown (this ruling).
+
 ---
 
 ## The LLM client
@@ -921,12 +963,14 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 4 — **in progress.** 4A: the escalation output. Still owed: the fail-then-recover run against a real model, which needs `tasks/fixture_repo_2/`.
+**Phase:** 4 — **in progress.** 4A: the escalation output. 4B: `tasks/fixture_repo_2/`, the naive-fix trap. Still owed: the fail-then-recover run itself, which is the first API spend since 3B.
 **Last completed:** 4A. Suite is **432 tests, all passing, about 195s.**
 
 **4A — the escalation output.** `cli.report` now takes `(state, log_path)` and renders each terminal status differently: an attempt ledger and a what-is-on-disk line for `escalated_retry_limit`, the duplicated diff and the attempt it came from for `escalated_livelock`, pytest's exit code and traceback for `escalated_broken_suite`, the Reviewer's verdict and the refused diff for `aborted_by_human`, and `Recovered from a <kind> on attempt N-1` for a `succeeded` run that took a retry. New in `cli.py`: `read_events`, `attempt_ledger`, `rendered_attempt`, `OUTCOME_EVENTS`, `APPLIED_OUTCOME`. `test_cli.py` grew 37 → 66. Everything argued in full under "The escalation output".
 
 **What Phase 4 did *not* have to build.** Evidence packaging and retry-with-evidence were already there — `tester_failure_from` and three `ReviewerRejection` sites in `loop.py` from 2.3, `render_evidence` and `RESET_NOTICE` in `implementer.py` from 3A. Phase 4's real content was the third item in its title.
+
+**4B — `tasks/fixture_repo_2/`.** A `billing` package whose commission bug tempts a one-token fix to a shared rounding helper that two invisible sibling tests depend on. Twenty tests, one red at baseline; the naive fix turns that into two red *different* tests, and the correct fix is all-green. Both halves proven mechanically before any call was spent — see "fixture_repo_2 — the naive-fix trap", and read "The ruling: never engineer a fixture to blind the Planner" before touching it.
 
 **The one thing still unexercised is the retry against a real model.** No model has ever received a `TesterFailure` or a `ReviewerRejection` in its prompt: `fixture_repo_1` gets fixed on attempt 1 every time, so `render_evidence` has never produced a byte a model read, and `RESET_NOTICE` — the load-bearing sentence stopping a model from making an incremental edit on a baseline that never held its fix — is still an argued claim rather than a measured one. That is what `tasks/fixture_repo_2/` is for; see "Fixture design: the recoverability constraint" for what shape it has to be, and budget ~5 API calls for the run (1 Planner + 2 × (Implementer + Reviewer)).
 
