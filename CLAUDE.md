@@ -391,7 +391,7 @@ Measured, not asserted: baseline is 1 failed / 19 passed; the failing variant is
 
 **Every step of the failure is the loop's own.** `prepare_run_dir` copies, `apply_edits` writes, the real `Tester` runs a real pytest subprocess, `tester_failure_from` packages the result exactly as `loop.py` does, and `reset_run_dir` puts the baseline back before the Implementer is called. Nothing about the failure is written by hand except the one comparison. The reset is the point: the Implementer is shown baseline files that **never held the change the evidence describes**, which is precisely the condition `RESET_NOTICE` exists for.
 
-**Result: 5/5.** `logs/probe_impl_20260902T074350Z.jsonl`. The Implementer received `evidence_kind: tester_failure` in a 4772-character user message and returned `if quantity >= tier.min_quantity:` — the plan's fix, clean, with no trace of the `- 1` it had been told about. All five checks passed and the suite went green.
+**Result: 5/5.** `transcripts/probe_impl_20260902T074350Z.jsonl`. The Implementer received `evidence_kind: tester_failure` in a 4772-character user message and returned `if quantity >= tier.min_quantity:` — the plan's fix, clean, with no trace of the `- 1` it had been told about. All five checks passed and the suite went green.
 
 **Read that number with the caveat it was built with: four of the five rows are ones a plan-follower would also pass.** What the probe establishes is that the evidence *was delivered to a real model for the first time*, and that the retry produced a correct fix rather than an incremental patch against the state it was told about. It does **not** establish that the evidence was read. That question is what `--no-evidence` is for, and it is still unspent — do not upgrade this result to "the Implementer reads evidence" without that arm.
 
@@ -1121,6 +1121,7 @@ README.md
 ## Working conventions
 
 - Small commits, one logical change each, real messages.
+- **A run whose result is cited in this file gets its log copied to `transcripts/`.** `logs/` is gitignored, so a citation into it dangles for everyone but the machine that produced it. `logs/` is where `EventLog` writes; `transcripts/` is what the repo keeps. Cite the second.
 - **No phase numbers in commit messages.** Say what the commit does, not where it sits in the plan: phase labels drift as the table is revised, they mean nothing to anyone reading `git log` without this file open beside it, and the same phase spans several commits anyway. The phase belongs in CLAUDE.md, which is where it can be corrected. `git log` should read as a history of changes, not of project management.
 - Write the test before or alongside the code, not after the phase.
 - Stub agents before real agents. Phases 1–2 make **zero API calls** — if a session is adding an API call before Phase 3, something is out of order.
