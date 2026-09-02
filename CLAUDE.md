@@ -1105,13 +1105,13 @@ tasks/
   fixture_repo_3/   the unfaithful-in-scope diff — a shortcut the test suite cannot detect
 runs/               gitignored — working copies, one per task_id
 logs/               gitignored — <task_id>.jsonl, one per run
+transcripts/        committed — the logs of runs this file cites as evidence
 tests/              tests for the harness itself — zero API calls, no API key
 cli.py
 probe_reviewer.py   instrument, not a component. Nine real calls; outside tests/ on purpose
 probe_implementer.py instrument. One real call (the plan is cached from a transcript)
-probe_plan.json     fixture 3's fetched plan; written by probe_reviewer --fetch-plan
+probe_plan.json     fixture 3's plan, fetched by probe_reviewer --fetch-plan. One call
 probe_plan_fixture_1.json  fixture 1's plan, lifted from a saved run. No call spent
-probe_plan.json     the cached Planner artifact the probes are built on
 CLAUDE.md
 README.md
 ```
