@@ -64,7 +64,7 @@ Build order. Phases 1–2 make **zero API calls**.
 | 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), the approval gate and apply step, scripted failure tests | in progress — 2.1, 2.2, 2.3 done |
 | 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | done — 3A (client, Planner, Implementer, `cli.py`), 3A.1 (Anthropic → Gemini), 3B (Reviewer, `--stub`) |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | done — evidence packaging and retry-with-evidence were already built in 2.3/3A; 4A adds the escalation output, 4B `fixture_repo_2`, 4C the run against it (green on attempt 1, trap did not spring) |
-| 5 | Fixture repo 3, Reviewer-rejection scenario, saved transcripts, README update — `fixture_repo_2` moved into Phase 4, which needed it for the recovery run | in progress — `tasks/fixture_repo_3/` and `probe_reviewer.py` built and dry-run verified; the probe pass itself is unspent |
+| 5 | Fixture repo 3, Reviewer-rejection scenario, saved transcripts, README update — `fixture_repo_2` moved into Phase 4, which needed it for the recovery run | in progress — 5A (fixture 3, `probe_reviewer.py`), 5.1 (probe pass **8/8**, end-to-end run), 5B (`probe_implementer.py`, **5/5**) |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
 
@@ -372,6 +372,52 @@ When the mechanical scope check fires, the harness constructs a **`ReviewerRejec
 The **event log** does distinguish them: `scope_check_failed` and `review_rejected` are separate event names. Provenance is a question for the log and for debugging, not for the Implementer's prompt.
 
 `TesterFailure` deliberately has no parsed `expected_vs_actual`. The traceback already contains it, and parsing pytest output is brittle. `stdout_tail` is capped at 2000 characters.
+
+### Measuring the retry path directly: `probe_implementer.py`
+
+**The same "wrong instrument" argument as `probe_reviewer.py`, applied one agent over.** CLAUDE.md has said since 3A that the retry against a real model is the one thing still unexercised: no model has ever received a `TesterFailure` in its prompt, so `render_evidence` has never produced a byte a model read, and `RESET_NOTICE` is an argued claim. Reaching that path through the loop means passing through the Planner first — and `fixture_repo_2` is exactly what that costs. Its trap was proven mechanically, the Planner fenced it off before the Implementer saw it, the run went green in three calls, and the retry was never reached.
+
+A full run also **conflates the two agents even when it works**: a green attempt 2 could be the Implementer reading the evidence, or the Planner having written a plan good enough that the evidence was never needed. The probe holds the plan fixed and hand-constructs the failure, so the only variable left is what the Implementer does with what it is handed.
+
+**The plan cost nothing.** `probe_plan_fixture_1.json` is lifted verbatim from `logs/fixture_repo_1_20260823T064826Z.jsonl`, the last real fixture-1 run. Re-fetching would spend a call on a plan already saved; inventing one would measure the Implementer against a rubric no Planner wrote. So the probe is **one call, not two** — unlike the Reviewer probe, which had no cached plan for its new fixture.
+
+**The hand-constructed failure is `>` overcorrected to `>= tier.min_quantity - 1`.** Inclusive, and off by one. Three properties, all verified before any call was spent:
+
+- **It is one character from correct.** The plan asked for an inclusive comparison and this *is* one. It is the mistake of a model reasoning about the right thing, not of one that understood nothing — which is what "plausibly wrong, not a strawman" has to mean.
+- **It fixes the bug it was asked to fix.** All eight `test_orders.py` tests pass under it, including `test_an_order_at_the_bulk_threshold_is_discounted`, the fixture's one red test at baseline. A variant that left the original failure standing would hand the Implementer evidence it had already been shown.
+- **It breaks two different boundaries.** `tier_for(9)` returns bulk and `tier_for(49)` returns wholesale. The evidence names quantities and tier labels that appear nowhere in the plan and nowhere in the baseline files. That is the part of the prompt that is genuinely new information.
+
+Measured, not asserted: baseline is 1 failed / 19 passed; the failing variant is **2 failed / 18 passed, and they are different tests**.
+
+**Every step of the failure is the loop's own.** `prepare_run_dir` copies, `apply_edits` writes, the real `Tester` runs a real pytest subprocess, `tester_failure_from` packages the result exactly as `loop.py` does, and `reset_run_dir` puts the baseline back before the Implementer is called. Nothing about the failure is written by hand except the one comparison. The reset is the point: the Implementer is shown baseline files that **never held the change the evidence describes**, which is precisely the condition `RESET_NOTICE` exists for.
+
+**Result: 5/5.** `logs/probe_impl_20260902T074350Z.jsonl`. The Implementer received `evidence_kind: tester_failure` in a 4772-character user message and returned `if quantity >= tier.min_quantity:` — the plan's fix, clean, with no trace of the `- 1` it had been told about. All five checks passed and the suite went green.
+
+**Read that number with the caveat it was built with: four of the five rows are ones a plan-follower would also pass.** What the probe establishes is that the evidence *was delivered to a real model for the first time*, and that the retry produced a correct fix rather than an incremental patch against the state it was told about. It does **not** establish that the evidence was read. That question is what `--no-evidence` is for, and it is still unspent — do not upgrade this result to "the Implementer reads evidence" without that arm.
+
+**Three assertions, and the third is the one that needs its caveat carried with it.** (1) the edits differ from the failing attempt; (2) the real Tester goes green; (3) the change addresses the boundary the evidence named — split into the nodeids the evidence listed now passing, the failing variant's `min_quantity - 1` mechanism being absent, and the change landing on `tier_for`'s comparison.
+
+### What the probe measures and what it cannot
+
+**On this plan, assertion 3 cannot separate evidence-reading from plan-following, and no arrangement of this fixture makes it.** The cached plan names the fix exactly — *"change `>` to `>=`"* — so an Implementer that ignored every line of the traceback and re-derived the fix from the plan lands on the same character as one that read it all.
+
+That is not a defect in the probe. It is a **structural consequence of invariant 4**: every attempt starts from a fresh baseline, so the failing variant's damage is erased before the Implementer runs. A pure plan-follower writing `>=` against the baseline gets a fully green suite no matter how wrong the previous attempt was. **Evidence can only be shown to be necessary when the plan under-determines the fix**, and a plan this specific never will be. The output prints, for each assertion, whether a plan-follower would also satisfy it, so the result cannot be over-read later.
+
+What the probe does establish, none of which is currently evidenced:
+
+- `render_evidence` produces text a real model receives without erroring — the first time.
+- The Implementer, handed evidence describing a state not on disk, does not emit an incremental patch against the state it was told about, or a truncated file, or no edits at all.
+- The result differs from the failing attempt and survives the real Tester.
+
+Separating evidence-reading from plan-following needs the **`--no-evidence` control arm**: the same plan and the same baseline with `evidence=None`, a second call. Identical edits across the two arms would say the evidence changed nothing *on this task* — a real finding, and a cheap one. It is built and **not run by default**, because it is a second call against a metered daily allowance and the question it answers is a follow-up to the first result, not a precondition for it.
+
+### Two observations from the dry run, which cost nothing
+
+The dry run is the first time anyone has looked at rendered evidence, and it turned up two things worth recording rather than discovering later at a call's expense.
+
+**`traceback` is a strict substring of `stdout_tail`.** Measured on this failure: 737 chars of traceback inside 1576 chars of tail, in a 2915-char evidence block — so roughly a quarter of it is sent twice. This is **defensible by design rather than a defect**: the traceback appears first under `Failure detail:`, the tail follows as context, and putting the signal before the noise is worth some duplication. Recorded so it is a decision. If evidence blocks ever need trimming, this is where the slack is, and the fix is to drop `stdout_tail` when it already contains the traceback — not to drop the traceback.
+
+**`RESET_NOTICE`'s em dash is intact; the terminal is what mangles it.** The `?` seen in dry-run output is `sys.stdout.encoding` being `cp1252` on this Windows console. The source byte sequence is `â` and the loaded string holds U+2014. **The prompt text is fine — do not "fix" it.** Checked because a corrupted character in a load-bearing prompt sentence would have been worth catching, and reporting it without checking would have been a false alarm.
 
 ---
 
@@ -769,6 +815,8 @@ That is the point of the fixture. **The Reviewer is not the best-positioned part
 
 **`task_description` states the requirement truthfully**, following fixture 2's precedent: it names the rule and says it *"holds for every such word, not only the one the failing test happens to name."* That is a statement about the requirement's generality, not an instruction about where the code goes. It is honest, and it is exactly the sentence the shortcut fails to satisfy.
 
+**The lottery ran, and the prediction below held: the end-to-end run went green on attempt 1, the Implementer never took the shortcut.** See 5.1 in Current status. What follows is the reasoning as written *before* that call, left standing because it called the outcome.
+
 **What this fixture measures, and the lottery it shares with fixture 2.** An end-to-end run measures the Reviewer only if a real Implementer actually takes the shortcut, and nothing guarantees it will — a Planner that writes *"add a sibilant branch to `_regular_plural`"* narrows the mechanism the same way fixture 2's Planner narrowed the file set, and a competent Implementer then produces the correct fix. **That is the fixture-2 outcome repeating one layer down**, and this time it is anticipated rather than discovered. The fixture is therefore not the primary instrument for the Reviewer question; `probe_reviewer.py` is. See "Measuring the Reviewer directly" under "The Reviewer".
 
 The fixture remains worth having on its own terms: it is the repository the probe's plan and diffs are built from, it is a third happy-path data point if the loop simply fixes it correctly, and it is the only fixture whose shortcut the test suite cannot detect.
@@ -907,7 +955,7 @@ A model asked "does this diff match this plan" says yes almost every time — an
 
 Deliberately absent: "be skeptical" framing, "find at least one issue", "when in doubt reject", and a confidence score (no field for it, and no code would read it).
 
-**None of this is measured.** It is argued, not evidenced. Until it is, `test_prompts.py` can only check the rendered text, not the judgment. The instrument built to measure it is `probe_reviewer.py`, below.
+**This was argued rather than evidenced until 5.1, and now it is evidenced.** `probe_reviewer.py` scored **8/8** against it — five unfaithful diffs rejected, three controls approved. `test_prompts.py` still only checks the rendered text; the judgment is measured by the probe, below, and by nothing in the suite.
 
 ### Measuring the Reviewer directly: `probe_reviewer.py`
 
@@ -942,9 +990,34 @@ So the Reviewer is measured **directly**, by hand-written `(plan, diff)` pairs: 
 
 **It lives at the repo root, outside `tests/`, and that placement is load-bearing.** The harness suite makes zero API calls and needs no API key; this script makes nine real calls and refuses to run without `GEMINI_API_KEY`. Putting it in `tests/` would buy `pytest -k probe` and cost that property. It is an **instrument, not a harness component**: nothing in `harness/` imports it, `cli.py` does not know it exists, and no run depends on it. It reads the fixture and never writes to it — it renders diffs but never applies them, and there is no Tester anywhere in its path, so it needs no working copy.
 
-**Status: built and dry-run verified; the nine calls are unspent.** `--dry-run` renders all eight pairs and makes no request, and that has been run. The measurement itself is blocked on `GEMINI_API_KEY`, which is not set in the environment where the script was built. Until the probe pass runs, **everything under "Guarding against a rubber stamp" remains argued rather than evidenced** — the instrument existing is not the measurement.
+**Result: 8/8 matched.** `transcripts/probe_20260902T061724Z.jsonl`. All five unfaithful diffs rejected, all three controls approved. **The five anti-rubber-stamp guards are no longer argued — they are evidenced**, which is the first time anything in this file's Reviewer section has been.
+
+Two details worth more than the score. **Probe 5 quoted the violated constraint verbatim**, so `violated_constraints` carries what the field was specified to carry rather than prose. And **probes 1 and 5 both rejected** — the matched pair — so the Reviewer derived the objection from the plan's mechanism without needing it spelled out in `constraints`; the constraint channel is confirmation here, not the load-bearing part.
+
+**Ruling: probe 1 naming `_regular_plural` is not evidence for the `repo_path` widening.** Verified mechanically rather than assumed: `_regular_plural` appears **nowhere in probe 1's diff text** — that diff is the added `IRREGULAR` row plus three lines of context — and it appears **explicitly in step 1 of the plan**, which says to update `_regular_plural` to check for sibilant endings. So the Reviewer citing it is reading the plan's own text back, not inferring the existence of code outside its window — its reason cites the diff's own hunk and the plan's named mechanism, and nothing else.
+
+The distinction is exactly what the revisit trigger is about. The trigger fires when the Reviewer **needs to see code it was not given**. Here it did not need to: the plan named the thing, and the name alone was sufficient to judge that the diff put the change somewhere else. A reason that described what `_regular_plural` *does*, or asserted something about its body, would have been the trigger firing. This is not that, and it is not a near-miss either. **The contract stays at `plan` + `diff`, and this pass is not evidence against it.**
+
+**Ruling: probes 6 and 8 having shorter reasons than the rejections is not a rubber stamp. The distinguishing test is the presence of the walk, not its length.** An approving reason is shorter because there is less to walk through — when every hunk maps cleanly onto a step, the enumeration terminates as soon as it runs out of hunks. Both controls *do* enumerate: probe 6 numbers two hunks and names the steps each carries out, probe 8 names step 1 against the tuple and step 2 against the `endswith` check in `pluralize`. They are short because the diffs are clean.
+
+A true rubber stamp differs in kind, not in degree: **no hunk-by-hunk walk at all**, just a verdict with a sentence in front of it — "this looks correct and matches the plan", which is the phrasing the system prompt already names as not a review. Neither control does that.
+
+**So the test to apply to future Reviewer output is: did it walk the hunks?** Not: was the walk long. A rejection is necessarily wordier, because it has to name the unaccounted thing *and* say what to do instead; scoring approvals against that length would push toward inventing objections, which is the failure mode the five guards exist to prevent.
 
 **The end-to-end `fixture_repo_3` run is deliberately not queued behind this, and is conditional on the result.** If probe 1 is rejected, an end-to-end run asks a real second question: whether that judgment survives a real Planner and a real Implementer in front of it. If probe 1 is approved, the end-to-end run is pointless — it would spend calls hoping a shortcut happens to arise, so that a Reviewer already shown to miss the direct case can miss it again less legibly.
+
+**This fired, and the rule held.** Probe 1 was rejected, the run followed, and it went green on attempt 1 — see 5.1 in Current status. The paragraph above is left in its pre-decision tense on purpose: it is the record that the criterion was fixed *before* the result was known, which is the only thing that makes it a criterion rather than a rationalisation.
+
+### What the retry mechanism proved, together
+
+The two probes measure the two halves of "retry on failure", and both halves are now independently verified.
+
+- **`probe_reviewer.py`: 8/8.** The judgment *behind* a rejection is real — five unfaithful diffs rejected with actionable reasons, three faithful ones approved, including the two controls that test the rules most likely to produce a false rejection.
+- **`probe_implementer.py`: 5/5.** The evidence *after* a failure reaches a real model, and the retry produces a correct fix — new edits, a green suite, the failing attempt's mechanism gone, and the boundaries the traceback named resolved.
+
+**Together these are stronger evidence than one lucky natural end-to-end failure would have been, and the reason is repeatability rather than sample size.** A natural failure is incidental: it happens or it does not, it arrives in whatever shape the sampling produced, and the run containing it cannot be re-run to check the result. Both fixtures built to produce one failed to — fixture 2's Planner fenced off the trap, fixture 3's Planner named the mechanism — so waiting for an incidental failure was never a plan, only a hope. Each probe is **deliberate and repeatable**: the plan is fixed, the failure is constructed, and the measurement can be run again and compared.
+
+**What this does not license.** Neither probe measures the *routing between* the halves — that a rejection becomes a `ReviewerRejection`, survives the baseline reset, and arrives in the Implementer's next prompt. `test_loop.py` covers that with stubs, and it has never run end-to-end against real models, because no real run has ever taken a retry. That is the one genuinely unexercised path left, and it is what a fail-then-recover run would still buy. See "Fixture design: the recoverability constraint" for the shape such a fixture has to have.
 
 ### An approving reason costs nothing downstream
 
@@ -1035,6 +1108,9 @@ logs/               gitignored — <task_id>.jsonl, one per run
 tests/              tests for the harness itself — zero API calls, no API key
 cli.py
 probe_reviewer.py   instrument, not a component. Nine real calls; outside tests/ on purpose
+probe_implementer.py instrument. One real call (the plan is cached from a transcript)
+probe_plan.json     fixture 3's fetched plan; written by probe_reviewer --fetch-plan
+probe_plan_fixture_1.json  fixture 1's plan, lifted from a saved run. No call spent
 probe_plan.json     the cached Planner artifact the probes are built on
 CLAUDE.md
 README.md
@@ -1045,6 +1121,7 @@ README.md
 ## Working conventions
 
 - Small commits, one logical change each, real messages.
+- **No phase numbers in commit messages.** Say what the commit does, not where it sits in the plan: phase labels drift as the table is revised, they mean nothing to anyone reading `git log` without this file open beside it, and the same phase spans several commits anyway. The phase belongs in CLAUDE.md, which is where it can be corrected. `git log` should read as a history of changes, not of project management.
 - Write the test before or alongside the code, not after the phase.
 - Stub agents before real agents. Phases 1–2 make **zero API calls** — if a session is adding an API call before Phase 3, something is out of order.
 - Prefer boring, readable code. This project is read by interviewers.
@@ -1056,26 +1133,30 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 5 — **in progress.** `tasks/fixture_repo_3/` and `probe_reviewer.py` are built, mechanically proven, and dry-run verified. **The probe pass has not run: `GEMINI_API_KEY` is not set in this environment.** Nine calls are queued and unspent.
-**Last completed:** the fixture-3 build. Suite is **432 tests, all passing, 176s** — the count is unchanged, because `pytest.ini`'s `norecursedirs` keeps `tasks/` out of collection and nothing in `tests/` imports the probe.
+**Phase:** 5 — **in progress. All three probe passes are complete and recorded.** The Reviewer probe scored **8/8**, the Implementer probe **5/5**, and the conditional end-to-end `fixture_repo_3` run went green on attempt 1. Both halves of retry-on-failure are now measured directly; see "What the retry mechanism proved, together".
+**Last completed:** `probe_implementer.py`, run and recorded. Suite is **432 tests, all passing, 176s** — the count is unchanged, because `pytest.ini`'s `norecursedirs` keeps `tasks/` out of collection and nothing in `tests/` imports the probe.
 
 (An earlier run in the same session failed one test in `TestGeneratorsAgainstTheRealTester`, then a re-run failed a *different* one in the same class, with the class taking 662s for five tests. Both pass in isolation in ~6s and the clean full run is green. That is the contention signature the note at the end of this section describes — recorded here because it recurred and cost time to rule out, not because anything changed.)
 
-**The next action, and the two commands that are it:**
+**The next action, and the one command that is it** — one call, no fetch, because the plan is lifted from a saved fixture-1 transcript:
 
 ```bash
-python probe_reviewer.py --fetch-plan
+python probe_implementer.py
 ```
 
-```bash
-python probe_reviewer.py
-```
+It answers a different question from the Reviewer probes and shares nothing with them, so the order between them is free. Read "Measuring the retry path directly" and especially "What the probe measures and what it cannot" before reading its output: assertion 3 passing does **not** show the Implementer read the evidence, and the script prints that caveat beside every row.
 
 The first spends one call and caches `probe_plan.json`. **Read the plan it prints before running the second.** If its steps name the mechanism as a check inside `_regular_plural`, probes 6 and 7 are valid controls as written and the second command runs unchanged. If the plan puts the rule somewhere else — inside `pluralize`, or via a different construct — then 6 and 7 are no longer faithful to it, and the `correct` and `correct_by_regex` builders must be adjusted to match the plan's mechanism before the other eight calls are spent. **That inspection gap is the entire reason `--fetch-plan` is a separate mode. Do not collapse the two into one command.**
 
-**What the probe pass decides, settled in advance so the result cannot be rationalised after the fact.** If probe 1 is rejected, run `fixture_repo_3` end-to-end: that asks the genuinely different question of whether the judgment survives a real Planner and a real Implementer in front of it. If probe 1 is approved, **do not run it** — it would spend calls hoping a shortcut happens to arise, so that a Reviewer already shown to miss the direct case can miss it again less legibly. Argued in full under "Measuring the Reviewer directly".
+**5.1 — the probe pass and the run it authorised. Both spent; 12 calls.** The pass scored **8/8** (`transcripts/probe_20260902T061724Z.jsonl`). Probe 1 was rejected, which under the rule settled in advance authorised the end-to-end run — and that run went **green on attempt 1 in three calls** (`transcripts/fixture_repo_3_20260902T062218Z.jsonl`).
+
+**The Planner closed the door again, and this was predicted in writing before the call.** Its plan named `_regular_plural` and listed the sibilant suffixes, so the Implementer had nothing to be unfaithful with and wrote the correct fix; the Reviewer approved it correctly. That is the fixture-2 outcome one layer down, anticipated in "What this fixture measures, and the lottery it shares with fixture 2" rather than discovered. **Two fixtures, two Planner rescues** — the finding that the plan/implement split earns its keep now has two data points, not one.
+
+It also settles what the fixture is for: **`fixture_repo_3` is not the instrument for the Reviewer question and should not be re-engineered to become one.** The probe measured that in eight independent shots; the run measured one happy path and confirmed a prediction. Both are worth having, and they are not substitutes.
 
 **Phase 4 — complete as built.** 4A: the escalation output. 4B: `tasks/fixture_repo_2/`, the naive-fix trap. 4C: the run against it — **green on attempt 1 in three calls; the trap did not spring.** The fail-then-recover run is still owed, and `fixture_repo_2` can no longer supply it. See "The trap did not spring".
+
+**5B — `probe_implementer.py`. 5/5.** Hand-constructs a plausible failing attempt on fixture 1 (`>` overcorrected to `>= tier.min_quantity - 1`), applies it through the real `apply_edits`, runs the real Tester, packages a real `TesterFailure`, resets to baseline, and hands plan + evidence to the real Implementer. One call; the plan is lifted verbatim from a saved fixture-1 transcript. The failing variant is 2 failed / 18 passed against the baseline's 1 failed / 19 passed, **and they are different tests** — it fixes the reported bug and breaks two other boundaries. Read "What the probe measures and what it cannot" before citing the 5/5 anywhere: on a plan that names the fix exactly, a green result cannot distinguish evidence-reading from plan-following, and that is a consequence of invariant 4 rather than a flaw in the probe. The `--no-evidence` control arm exists for that question and is a second call, not run by default.
 
 **5A — `tasks/fixture_repo_3/` and `probe_reviewer.py`.** A `labels` package whose sibilant-plural bug has a one-row shortcut through the `IRREGULAR` table. Eighteen tests, one red at baseline; **both the shortcut and the correct fix turn the suite fully green**, which is the inversion of fixture 2 that makes this a Reviewer fixture rather than a Tester one. `probe_reviewer.py` feeds eight hand-written `(plan, diff)` pairs — five unfaithful, three controls — to the real `Reviewer` via `reviewer.run(state)`, on a plan fetched from the real Planner. Read "fixture_repo_3 — the unfaithful-in-scope diff" and "Measuring the Reviewer directly" before touching either, and read "The ruling: never engineer a fixture to blind the Planner" before editing the fixture's docstrings — the terseness of `plurals.py`'s module docstring is a decision, argued there, not an omission.
 

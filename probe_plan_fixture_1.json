@@ -1,0 +1,15 @@
+{
+  "summary": "Orders at exact tier thresholds (e.g. 10 units) fail to qualify for discount tiers due to a strict inequality comparison. Changing the check in `tier_for` from strict greater-than to greater-than-or-equal enables inclusive lower bounds.",
+  "steps": [
+    "In `pricing/discounts.py`, locate the `tier_for` function.",
+    "Change the comparison inside the `for tier in TIERS:` loop from `if quantity > tier.min_quantity:` to `if quantity >= tier.min_quantity:`."
+  ],
+  "target_files": [
+    "pricing/discounts.py"
+  ],
+  "constraints": [
+    "No file other than `pricing/discounts.py` is edited.",
+    "`tier_for` retains its signature `tier_for(quantity: int) -> Tier`.",
+    "No test files are modified."
+  ]
+}
