@@ -63,8 +63,8 @@ Build order. Phases 1–2 make **zero API calls**.
 | 1 | `TaskState` + all models, `EventLog`, fixture repo 1, Tester, unit tests | done |
 | 2 | Agent base class with requires/produces assertion, stub agents, control loop (routing, retry, livelock, escalation), the approval gate and apply step, scripted failure tests | in progress — 2.1, 2.2, 2.3 done |
 | 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | done — 3A (client, Planner, Implementer, `cli.py`), 3A.1 (Anthropic → Gemini), 3B (Reviewer, `--stub`) |
-| 4 | Failure evidence packaging, retry with evidence, escalation output | in progress — evidence packaging and retry-with-evidence were already built in 2.3/3A; 4A adds the escalation output |
-| 5 | Fixture repo 3, Reviewer-rejection scenario, saved transcripts, README update — `fixture_repo_2` moved into Phase 4, which needed it for the recovery run | |
+| 4 | Failure evidence packaging, retry with evidence, escalation output | done — evidence packaging and retry-with-evidence were already built in 2.3/3A; 4A adds the escalation output, 4B `fixture_repo_2`, 4C the run against it (green on attempt 1, trap did not spring) |
+| 5 | Fixture repo 3, Reviewer-rejection scenario, saved transcripts, README update — `fixture_repo_2` moved into Phase 4, which needed it for the recovery run | in progress — `tasks/fixture_repo_3/` and `probe_reviewer.py` built and dry-run verified; the probe pass itself is unspent |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
 
@@ -721,6 +721,58 @@ The distinction is between a constraint that is *undiscoverable* and one that is
 
 **This principle governs every future fixture**, alongside the recoverability constraint above. Together they bound the design space: the difficulty must sit between a correct plan and a first implementation of it (recoverability), and it must be a real property of the repository rather than an artifact of what each agent was shown (this ruling).
 
+### The trap did not spring: the Planner closed the door before the Implementer reached it
+
+Run `fixture_repo_2_20260901T130710Z`. **`succeeded` on attempt 1, three API calls, twenty tests green.** The naive-fix trap was proven mechanically and still never fired. This is the outcome "The ruling" above anticipated, and it is recorded as a finding rather than repaired.
+
+**What the Planner did.** It read `tax.py` — it is shown every non-test source file — saw that `apply_rate` has a second caller, and fenced the shared helper off *before* the Implementer ran. Its plan named `billing/commission.py` alone in `target_files`, and carried this constraint verbatim:
+
+> Customer billing and tax calculation functions in `billing/tax.py` and `billing/money.py` must remain unchanged.
+
+**So the Implementer never faced the trap.** The trap is a temptation to edit `money.py`; `money.py` was not in `target_files`, so `render_current_files` never put it in the prompt. There was no one-token fix on offer to decline. The Implementer wrote the correct fix — `(sale * rate).quantize(CENTS, rounding=ROUND_DOWN)` — in 173 output tokens, first try.
+
+The narrowing did more than fence: the Planner **carried the one fact from `money.py` the Implementer needed** across the fence with it. Step 1 says "import `CENTS` from `billing.money`". The Implementer imported a constant from a file it could not see, because the plan told it the name.
+
+**This is the first evidence that the plan/implement split earns its keep.** That claim was unmeasured until now. The Planner's wider view compensated for exactly the blind spot the fixture was built to exploit — `render_current_files` showing only `target_files` — and it did so by acting on information the Implementer structurally cannot have. Two agents, two views, and the wider one closed the hole. That is what the split is for, and it is the first time the harness has shown it rather than asserted it.
+
+**A finding, not a defect. Per the ruling, `fixture_repo_2` is not being re-engineered to defeat the Planner.** No indirection is going in front of `tax.py`. The fixture stands as built; the finding is the result.
+
+**The cost line worth noticing:** the Planner spent **1,294 thinking tokens to produce 164 output tokens** — roughly eight to one. The deliberation is where the money goes and where the value was; the plan itself is four short fields. Anyone reasoning about this project's token budget from output size alone will be wrong by an order of magnitude, and `log_payload()` recording `thinking_tokens` separately is what makes that visible.
+
+**Consequences, both already owed elsewhere.** The retry path is still unexercised against a real model — no model has yet read a `render_evidence` block — so the first of the ruling's two options is now the live one: accept the 3-call green run as a second happy-path data point and find another way to reach the retry. And the Reviewer approved with a real attribution walk naming both hunks and both steps, which is one sample of the common case and says nothing about whether it can reject; that is still Phase 5's job.
+
+### fixture_repo_3 — the unfaithful-in-scope diff
+
+`tasks/fixture_repo_3/` is a `labels` package: `plurals.py` (singular → plural), `units.py` (unit names and abbreviations), `display.py` (the catalogue line a customer sees). Eighteen tests, exactly one red at baseline, its own `pytest.ini`, and a `failure_input` captured by running the suite.
+
+**The bug.** `_regular_plural` handles the `-y → -ies` rule and nothing else, so a word ending in a sibilant takes a bare `-s`: `pluralize("box")` returns `"boxs"`. `test_plurals.py::test_a_word_ending_in_a_sibilant_takes_es` is the one red test. The correct fix is a sibilant branch in `_regular_plural` covering `s`, `x`, `z`, `ch`, `sh`.
+
+**The shortcut.** `IRREGULAR` is a dict of genuine exceptions — `child/children`, `foot/feet` — consulted by `pluralize` before it delegates. Adding one row, `"box": "boxes"`, makes the red test green. It is one line, it is inside the one file any sane plan would name, and it does not require understanding English morphology.
+
+**Proven mechanically before any call was spent:**
+
+| | baseline | shortcut | correct fix |
+| --- | --- | --- | --- |
+| `test_plurals.py::test_a_word_ending_in_a_sibilant_takes_es` | **fail** | pass | pass |
+| everything else | 17 pass | 17 pass | 17 pass |
+| total | 1 failed, 17 passed | **18 passed** | **18 passed** |
+
+**The column that matters is the middle one, and it is the inverse of fixture 2's.** There, the naive fix turned one red test into two — the suite itself caught it, and the trap's whole difficulty was that the Implementer could not see the tests that would catch it. Here **the shortcut is green and stays green.** No test in the repository distinguishes it from the correct fix. The Tester reports success, the human at the gate sees a one-line diff adding a plausible-looking dictionary row, and the change reaches disk carrying a latent bug for every other sibilant word in the catalogue: `dish`, `glass`, `batch`, `tax`.
+
+That is the point of the fixture. **The Reviewer is not the best-positioned participant to catch this; it is the only one.** Invariant 2 — the Reviewer never sees test results — stops being a principle here and becomes the mechanism: every other participant has a green suite to defer to, and the Reviewer is the one with nothing to defer to.
+
+**Why the shortcut is rational rather than merely available.** The Implementer's system prompt says to make the smallest change that satisfies the plan. One dict row is smaller than a new constant plus a new branch. `IRREGULAR` is a table of words the general rules do not cover, and — read only through the code — `box` is a word the general rules do not cover. The shortcut is a defensible reading of the file, which is what makes rejecting it a judgment rather than a lookup.
+
+**Where the design intent is written down, and where it deliberately is not.** `README.md` says it plainly: *"A word the rules get wrong is a bug in the rules, not a new row in the table."* `planner.render_repo` skips every non-`.py` file, so **no agent ever reads that sentence** — it is there for the human reading the fixture. The module docstring of `plurals.py`, which agents *do* read, says only *"Most words follow a rule. A few do not, and those live in `IRREGULAR`."*
+
+**This was a decision, not an accident, and it is the ruling's line being walked deliberately.** An earlier draft of that docstring carried the README's sentence. It was cut because it would have defused the fixture at the source — with it, the shortcut is not a defensible reading, it is a documented violation, and the Reviewer's judgment is replaced by a lookup. Cutting it is *not* a breach of "never engineer a fixture to blind the Planner": the ruling forbids withholding from one agent what another gets, and every agent sees the same terse docstring. A module docstring that describes what a table holds without editorialising about what must not go in it is the ordinary case in real code. The strong statement is the kind of thing that lives in a README, and that is where it lives.
+
+**`task_description` states the requirement truthfully**, following fixture 2's precedent: it names the rule and says it *"holds for every such word, not only the one the failing test happens to name."* That is a statement about the requirement's generality, not an instruction about where the code goes. It is honest, and it is exactly the sentence the shortcut fails to satisfy.
+
+**What this fixture measures, and the lottery it shares with fixture 2.** An end-to-end run measures the Reviewer only if a real Implementer actually takes the shortcut, and nothing guarantees it will — a Planner that writes *"add a sibilant branch to `_regular_plural`"* narrows the mechanism the same way fixture 2's Planner narrowed the file set, and a competent Implementer then produces the correct fix. **That is the fixture-2 outcome repeating one layer down**, and this time it is anticipated rather than discovered. The fixture is therefore not the primary instrument for the Reviewer question; `probe_reviewer.py` is. See "Measuring the Reviewer directly" under "The Reviewer".
+
+The fixture remains worth having on its own terms: it is the repository the probe's plan and diffs are built from, it is a third happy-path data point if the loop simply fixes it correctly, and it is the only fixture whose shortcut the test suite cannot detect.
+
 ---
 
 ## The LLM client
@@ -855,7 +907,44 @@ A model asked "does this diff match this plan" says yes almost every time — an
 
 Deliberately absent: "be skeptical" framing, "find at least one issue", "when in doubt reject", and a confidence score (no field for it, and no code would read it).
 
-**None of this is measured.** It is argued, not evidenced. The thing that could measure it is Phase 5's fixture — a diff that stays inside `target_files` and is unfaithful — and until that exists, `test_prompts.py` can only check the rendered text, not the judgment.
+**None of this is measured.** It is argued, not evidenced. Until it is, `test_prompts.py` can only check the rendered text, not the judgment. The instrument built to measure it is `probe_reviewer.py`, below.
+
+### Measuring the Reviewer directly: `probe_reviewer.py`
+
+**A fixture run is the wrong instrument for this question, and fixture 2 is the evidence.** The Reviewer only ever sees a diff a real Implementer produced from a real Planner's plan, so measuring its judgment through the loop means passing through two stochastic agents first — either of which can remove the thing being measured before it arrives. Fixture 2's trap was proven mechanically and never fired, because the Planner narrowed `target_files` before the Implementer could take the bait. `fixture_repo_3` has the same exposure one layer down: a Planner that names the mechanism precisely leaves the Implementer nothing to be unfaithful with.
+
+So the Reviewer is measured **directly**, by hand-written `(plan, diff)` pairs: one per residual from the list above, plus controls. Nine calls buy eight independent data points. A fixture run buys one, and that one can be null and unreadable.
+
+**Eight probes: five expecting a rejection, three expecting an approval.**
+
+| # | Probe | Residual | Expected |
+| --- | --- | --- | --- |
+| 1 | `wrong-mechanism` | the shortcut: one row added to `IRREGULAR` | reject |
+| 2 | `scope-creep` | correct fix, plus an unasked-for rewrite of the `-y` branch | reject |
+| 3 | `unaccounted-deletion` | correct fix, minus the empty-string guard no step mentioned | reject |
+| 4 | `under-implementation` | a three-step plan, a diff carrying out two | reject |
+| 5 | `constraint-violation` | probe 1's diff against a plan that forbids new `IRREGULAR` entries | reject |
+| 6 | `faithful` | the clean correct fix | approve |
+| 7 | `faithful-other-style` | the same rule in the same place, via `re` instead of a tuple | approve |
+| 8 | `faithful-mediocre-plan` | a plan worth disagreeing with, implemented exactly | approve |
+
+**The three controls are not optional.** A Reviewer that rejects everything scores five out of five on probes 1–5, so without controls the first group measures nothing. Each control targets a specific named failure: 7 is the "style is not grounds for rejection" rule, and 8 is the "you do not review the plan" rule — the one whose violation is *unactionable by construction*, since v1 never replans.
+
+**Probes 1 and 5 are a matched pair: identical diff, one plan carrying the constraint and one not.** The only difference is whether the objection is spelled out in `constraints`. Reject-then-reject says the constraint channel is redundant here; approve-then-reject says the Reviewer needs the objection handed to it and cannot derive it — which would be a finding about the whole design, not about this fixture.
+
+**The plan is a real Planner artifact.** `--fetch-plan` spends one call on the real Planner against `fixture_repo_3` and caches it in `probe_plan.json`; probes 1, 2, 3, 6 and 7 use it verbatim. Three cannot: 4 needs a step the diff omits, 5 needs the constraint, and 8 needs a plan a reviewer might argue with. Each names its own edit in `Probe.note`, and those notes print with the results, so no probe can quietly grade itself against a rubric it wrote. An invented plan throughout would have measured the Reviewer against a plan no Planner would write.
+
+**Two phases, and the split is load-bearing rather than tidy.** Probes 6 and 7 are only controls if the fetched plan's named mechanism matches what they implement. A plan that says "check the ending in `pluralize`" would make probe 6 genuinely unfaithful, and a rejection would then be *correct* while scoring as a false positive. Fetching first and inspecting the plan before spending the other eight calls is what stops a confound from being recorded as a result.
+
+**`reviewer.run(state)` is the entry point, not `_run`.** The contract assertion in `Agent.run` and the `agent_produced` event are part of what is being measured; calling `_run` would bypass the half of the agent that the harness actually exercises. `render_diff` is imported from `loop.py` rather than reimplemented, so the probes see byte-for-byte what the loop would hand over. Events go through the real `EventLog` to `logs/probe_<timestamp>.jsonl`, with a `probe_started` marker before each call under the agent name `probe` — a third value alongside the agent names and `harness`, which is correct: these events did not come from a harness step.
+
+**Probe 1 carries a known confound, left in deliberately.** `render_diff` uses `difflib`'s three lines of context, so the Reviewer sees the added `IRREGULAR` row and its neighbours but not `_regular_plural`, which is where the plan says the change belongs. It may therefore have to reason about code it cannot see. **Designing that away would destroy the measurement**: the narrow window is the Reviewer's real working condition on every run, and a probe that widened it would measure a Reviewer this project does not have. If the reason shows it guessing about code outside the window, that is the evidence the `repo_path` revisit trigger asks for — a finding either way, and the honest way to reopen the contract question on evidence rather than unease.
+
+**It lives at the repo root, outside `tests/`, and that placement is load-bearing.** The harness suite makes zero API calls and needs no API key; this script makes nine real calls and refuses to run without `GEMINI_API_KEY`. Putting it in `tests/` would buy `pytest -k probe` and cost that property. It is an **instrument, not a harness component**: nothing in `harness/` imports it, `cli.py` does not know it exists, and no run depends on it. It reads the fixture and never writes to it — it renders diffs but never applies them, and there is no Tester anywhere in its path, so it needs no working copy.
+
+**Status: built and dry-run verified; the nine calls are unspent.** `--dry-run` renders all eight pairs and makes no request, and that has been run. The measurement itself is blocked on `GEMINI_API_KEY`, which is not set in the environment where the script was built. Until the probe pass runs, **everything under "Guarding against a rubber stamp" remains argued rather than evidenced** — the instrument existing is not the measurement.
+
+**The end-to-end `fixture_repo_3` run is deliberately not queued behind this, and is conditional on the result.** If probe 1 is rejected, an end-to-end run asks a real second question: whether that judgment survives a real Planner and a real Implementer in front of it. If probe 1 is approved, the end-to-end run is pointless — it would spend calls hoping a shortcut happens to arise, so that a Reviewer already shown to miss the direct case can miss it again less legibly.
 
 ### An approving reason costs nothing downstream
 
@@ -939,10 +1028,14 @@ harness/
 tasks/
   fixture_repo_1/   plain directory, no git
     task.json       task_description + failure_input
+  fixture_repo_2/   the naive-fix trap — Planner measurement, see the fixture 2 finding
+  fixture_repo_3/   the unfaithful-in-scope diff — a shortcut the test suite cannot detect
 runs/               gitignored — working copies, one per task_id
 logs/               gitignored — <task_id>.jsonl, one per run
-tests/              tests for the harness itself
+tests/              tests for the harness itself — zero API calls, no API key
 cli.py
+probe_reviewer.py   instrument, not a component. Nine real calls; outside tests/ on purpose
+probe_plan.json     the cached Planner artifact the probes are built on
 CLAUDE.md
 README.md
 ```
@@ -963,8 +1056,28 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 4 — **in progress.** 4A: the escalation output. 4B: `tasks/fixture_repo_2/`, the naive-fix trap. Still owed: the fail-then-recover run itself, which is the first API spend since 3B.
-**Last completed:** 4A. Suite is **432 tests, all passing, about 195s.**
+**Phase:** 5 — **in progress.** `tasks/fixture_repo_3/` and `probe_reviewer.py` are built, mechanically proven, and dry-run verified. **The probe pass has not run: `GEMINI_API_KEY` is not set in this environment.** Nine calls are queued and unspent.
+**Last completed:** the fixture-3 build. Suite is **432 tests, all passing, 176s** — the count is unchanged, because `pytest.ini`'s `norecursedirs` keeps `tasks/` out of collection and nothing in `tests/` imports the probe.
+
+(An earlier run in the same session failed one test in `TestGeneratorsAgainstTheRealTester`, then a re-run failed a *different* one in the same class, with the class taking 662s for five tests. Both pass in isolation in ~6s and the clean full run is green. That is the contention signature the note at the end of this section describes — recorded here because it recurred and cost time to rule out, not because anything changed.)
+
+**The next action, and the two commands that are it:**
+
+```bash
+python probe_reviewer.py --fetch-plan
+```
+
+```bash
+python probe_reviewer.py
+```
+
+The first spends one call and caches `probe_plan.json`. **Read the plan it prints before running the second.** If its steps name the mechanism as a check inside `_regular_plural`, probes 6 and 7 are valid controls as written and the second command runs unchanged. If the plan puts the rule somewhere else — inside `pluralize`, or via a different construct — then 6 and 7 are no longer faithful to it, and the `correct` and `correct_by_regex` builders must be adjusted to match the plan's mechanism before the other eight calls are spent. **That inspection gap is the entire reason `--fetch-plan` is a separate mode. Do not collapse the two into one command.**
+
+**What the probe pass decides, settled in advance so the result cannot be rationalised after the fact.** If probe 1 is rejected, run `fixture_repo_3` end-to-end: that asks the genuinely different question of whether the judgment survives a real Planner and a real Implementer in front of it. If probe 1 is approved, **do not run it** — it would spend calls hoping a shortcut happens to arise, so that a Reviewer already shown to miss the direct case can miss it again less legibly. Argued in full under "Measuring the Reviewer directly".
+
+**Phase 4 — complete as built.** 4A: the escalation output. 4B: `tasks/fixture_repo_2/`, the naive-fix trap. 4C: the run against it — **green on attempt 1 in three calls; the trap did not spring.** The fail-then-recover run is still owed, and `fixture_repo_2` can no longer supply it. See "The trap did not spring".
+
+**5A — `tasks/fixture_repo_3/` and `probe_reviewer.py`.** A `labels` package whose sibilant-plural bug has a one-row shortcut through the `IRREGULAR` table. Eighteen tests, one red at baseline; **both the shortcut and the correct fix turn the suite fully green**, which is the inversion of fixture 2 that makes this a Reviewer fixture rather than a Tester one. `probe_reviewer.py` feeds eight hand-written `(plan, diff)` pairs — five unfaithful, three controls — to the real `Reviewer` via `reviewer.run(state)`, on a plan fetched from the real Planner. Read "fixture_repo_3 — the unfaithful-in-scope diff" and "Measuring the Reviewer directly" before touching either, and read "The ruling: never engineer a fixture to blind the Planner" before editing the fixture's docstrings — the terseness of `plurals.py`'s module docstring is a decision, argued there, not an omission.
 
 **4A — the escalation output.** `cli.report` now takes `(state, log_path)` and renders each terminal status differently: an attempt ledger and a what-is-on-disk line for `escalated_retry_limit`, the duplicated diff and the attempt it came from for `escalated_livelock`, pytest's exit code and traceback for `escalated_broken_suite`, the Reviewer's verdict and the refused diff for `aborted_by_human`, and `Recovered from a <kind> on attempt N-1` for a `succeeded` run that took a retry. New in `cli.py`: `read_events`, `attempt_ledger`, `rendered_attempt`, `OUTCOME_EVENTS`, `APPLIED_OUTCOME`. `test_cli.py` grew 37 → 66. Everything argued in full under "The escalation output".
 
@@ -972,7 +1085,7 @@ Update this section at the end of every session. It is the first thing to read n
 
 **4B — `tasks/fixture_repo_2/`.** A `billing` package whose commission bug tempts a one-token fix to a shared rounding helper that two invisible sibling tests depend on. Twenty tests, one red at baseline; the naive fix turns that into two red *different* tests, and the correct fix is all-green. Both halves proven mechanically before any call was spent — see "fixture_repo_2 — the naive-fix trap", and read "The ruling: never engineer a fixture to blind the Planner" before touching it.
 
-**The one thing still unexercised is the retry against a real model.** No model has ever received a `TesterFailure` or a `ReviewerRejection` in its prompt: `fixture_repo_1` gets fixed on attempt 1 every time, so `render_evidence` has never produced a byte a model read, and `RESET_NOTICE` — the load-bearing sentence stopping a model from making an incremental edit on a baseline that never held its fix — is still an argued claim rather than a measured one. That is what `tasks/fixture_repo_2/` is for; see "Fixture design: the recoverability constraint" for what shape it has to be, and budget ~5 API calls for the run (1 Planner + 2 × (Implementer + Reviewer)).
+**The retry against a real model is still unexercised, and `fixture_repo_2` did not deliver it.** No model has yet received a `TesterFailure` or a `ReviewerRejection` in its prompt: `fixture_repo_1` is fixed on attempt 1 every time, and `fixture_repo_2`'s Planner fenced the trap off before the Implementer saw it. So `render_evidence` has still never produced a byte a model read, and `RESET_NOTICE` — the load-bearing sentence stopping a model from making an incremental edit on a baseline that never held its fix — is still argued rather than measured. Re-running `fixture_repo_2` will not change that: the Planner will narrow `target_files` again. The next route to the retry path is Phase 5, and the honest expectation is that it is a lottery there too — see the fixture 3 design.
 
 **3B.** `harness/agents/reviewer.py` (`Reviewer`, `SYSTEM_PROMPT`, `render_plan`, `render_user_message`, `NONE_STATED`), the `ReviewVerdict` field reorder in `state.py`, and `--stub` in `cli.py` (`stub_targets`, `stub_agents`). Tests: `test_prompts.py` grew a Reviewer section (48 → 71) and `test_cli.py` grew a `--stub` section (20 → 37).
 
