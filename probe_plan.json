@@ -1,0 +1,16 @@
+{
+  "summary": "Update `_regular_plural` in `labels/plurals.py` to append 'es' to words ending in sibilant sounds (s, x, z, ch, sh).",
+  "steps": [
+    "In `labels/plurals.py`, update `_regular_plural` to check if `word` ends with 's', 'x', 'z', 'ch', or 'sh' before returning the default plural form.",
+    "If `word` ends with any of those suffixes, return `word + 'es'`."
+  ],
+  "target_files": [
+    "labels/plurals.py"
+  ],
+  "constraints": [
+    "Only `labels/plurals.py` is modified.",
+    "No test files are modified.",
+    "Existing functionality for words ending in 'y' or irregular plurals is preserved.",
+    "Function signatures in `labels/plurals.py` remain unchanged."
+  ]
+}
