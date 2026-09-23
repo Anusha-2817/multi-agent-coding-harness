@@ -192,7 +192,7 @@ price of not stubbing the Tester.
 | Test execution | `subprocess` running `pytest`, 120s timeout, via `sys.executable -m pytest` |
 | Event log | Append-only `.jsonl`, one file per run |
 | Baseline reset | Delete `runs/<task_id>/`, re-copy the fixture with `shutil.copytree` |
-| Entrypoint | `python cli.py --task <path/to/task.json> [--stub]` |
+| Entrypoint | `python cli.py --repo <path> [--description "<text>"] [--stub]`, or `--task <path/to/task.json>` |
 
 Edits carry whole files rather than patches because a model emitting a valid unified diff with
 correct line offsets is a much harder ask than emitting a file; the diff is *rendered* by the
@@ -333,6 +333,14 @@ stubs and has never run end-to-end against real models, because no real run has 
 retry. Every fixture built to force one was rescued by the Planner instead.
 
 ## Running it
+
+```
+python cli.py --repo tasks/fixture_repo_1 [--description "<text>"] [--stub]
+```
+
+Points `--repo` at any directory on disk and the harness runs the suite itself to find the
+failing test — no `task.json` needed. `--failure "<verbatim pytest output>"` overrides discovery
+under `--repo`. The original form still works, and is what the three built fixtures use:
 
 ```
 python cli.py --task tasks/fixture_repo_1/task.json [--stub]
