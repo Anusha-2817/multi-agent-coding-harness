@@ -23,11 +23,16 @@ from fixture_edits import broken_edits, failing_edits, fixing_edits
 from test_loop import run_scenario
 
 from cli import (
+    DEFAULT_DESCRIPTION,
+    UNNAMED_REPO,
     attempt_ledger,
+    discover_failure,
     main,
     read_task_file,
     rendered_attempt,
+    repo_dir_name,
     report,
+    resolve_repo,
     stub_agents,
     stub_targets,
     terminal_approval,
@@ -747,6 +752,392 @@ class TestStubAgents:
             stub_agents(log, str(tmp_path))
 
         assert "no non-test Python file" in str(caught.value)
+
+
+class TestResolvingTheRepo:
+    """`--repo` becomes half a `task_id`, so it is resolved before `.name`.
+
+    The fixture-era assumption `make_task_id` carried was the caller's, not its
+    own: it takes a directory name, and until 6.1 the only callers passed
+    `tasks/fixture_repo_N`, which is already a clean name. Any path on disk is
+    not.
+    """
+
+    def test_a_real_directory_comes_back_absolute(self, tmp_path):
+        assert resolve_repo(tmp_path) == tmp_path.resolve()
+
+    def test_a_missing_directory_names_the_path_it_was_given(self, tmp_path):
+        missing = tmp_path / "nope"
+
+        with pytest.raises(SystemExit) as caught:
+            resolve_repo(missing)
+
+        assert str(missing) in str(caught.value)
+
+    def test_a_file_is_not_a_repo(self, tmp_path):
+        path = tmp_path / "task.json"
+        path.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(SystemExit):
+            resolve_repo(path)
+
+    def test_a_relative_dot_resolves_to_a_real_name(self, monkeypatch, tmp_path):
+        """`--repo .` is the case that matters. Unresolved, `Path(".").name` is
+        `"."`, and the run directory would be a hidden `runs/._2026...`."""
+        worktree = tmp_path / "some_project"
+        worktree.mkdir()
+        monkeypatch.chdir(worktree)
+
+        assert repo_dir_name(resolve_repo(Path("."))) == "some_project"
+
+    def test_a_trailing_separator_does_not_empty_the_name(self, tmp_path):
+        worktree = tmp_path / "trailing"
+        worktree.mkdir()
+
+        assert repo_dir_name(resolve_repo(Path(f"{worktree}/"))) == "trailing"
+
+    def test_a_nameless_root_falls_back_rather_than_leading_with_an_underscore(self):
+        """Only reachable for a filesystem root, whose `.name` is `""`."""
+        assert repo_dir_name(Path(Path.cwd().anchor)) == UNNAMED_REPO
+
+
+class TestDiscoveringTheFailure:
+    """The bootstrap, driven against the real fixture with a real pytest.
+
+    Real subprocesses, like `test_tester.py`: the whole job of this function is
+    reporting what a real pytest said, so a stubbed one would only test the stub.
+    """
+
+    def log(self, tmp_path: Path) -> EventLog:
+        return EventLog("discovery_test", log_dir=tmp_path / "logs")
+
+    def test_it_finds_the_fixtures_real_failure(self, tmp_path):
+        result = discover_failure(FIXTURE, self.log(tmp_path))
+
+        assert result.passed is False
+        assert result.exit_code == 1
+        assert result.failed_tests == [
+            "tests/test_orders.py::test_an_order_at_the_bulk_threshold_is_discounted"
+        ]
+
+    def test_the_output_is_verbatim_and_unsanitized(self, tmp_path):
+        """The same rule every hand-captured `task.json` follows. The banner and
+        the machine-specific `rootdir:` are part of the input, not noise to trim
+        -- and `rootdir` names the *source* repo, which is what makes it the
+        stale path CLAUDE.md deliberately keeps."""
+        result = discover_failure(FIXTURE, self.log(tmp_path))
+
+        assert result.stdout.startswith("============================= test session starts")
+        assert "platform " in result.stdout
+        assert f"rootdir: {FIXTURE}" in result.stdout
+        assert "1 failed, 19 passed" in result.stdout
+
+    def test_it_reproduces_the_hand_captured_failure_input(self, tmp_path):
+        """Task 6.0.5's acceptance test, as an assertion rather than a one-off.
+
+        Not byte equality, and the two exempted lines are the whole finding.
+        `plugins:` differs because `anyio` arrived with `google-genai` a phase
+        after `task.json` was captured -- a stale hand capture, not something
+        discovery did -- and the duration line is wall clock. Everything else,
+        including the stale `rootdir:`, matches character for character."""
+        hand = json.loads((FIXTURE / "task.json").read_text(encoding="utf-8"))
+        found = discover_failure(FIXTURE, self.log(tmp_path)).stdout
+
+        def comparable(text: str) -> list[str]:
+            return [
+                line
+                for line in text.splitlines()
+                if not line.startswith("plugins:") and " in 0." not in line
+            ]
+
+        assert comparable(found) == comparable(hand["failure_input"])
+
+    def test_a_green_suite_is_reported_rather_than_turned_into_a_task(self, tmp_path):
+        green = tmp_path / "green_repo"
+        (green / "tests").mkdir(parents=True)
+        (green / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n", encoding="utf-8")
+        (green / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+        result = discover_failure(green, self.log(tmp_path))
+
+        assert result.passed is True
+        assert result.failed_tests == []
+
+    def test_the_log_carries_the_output_so_it_is_not_only_on_screen(self, tmp_path):
+        """For a `--task` run `failure_input` is committed in `task.json`; for a
+        discovered one the log is the only place it exists. CLAUDE.md's claim
+        that a run's log is self-contained depends on this event."""
+        log = self.log(tmp_path)
+        result = discover_failure(FIXTURE, log)
+
+        events = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
+        discovery = [event for event in events if event["event"] == "failure_discovery"]
+
+        assert len(discovery) == 1
+        assert discovery[0]["agent"] == "harness"
+        assert discovery[0]["payload"]["output"] == result.stdout
+        assert discovery[0]["payload"]["passed"] is False
+
+    def test_the_target_repo_is_left_as_it_was_found(self, tmp_path):
+        """Discovery runs pytest *in* the repo it was pointed at, so it writes
+        `__pycache__` and `.pytest_cache` there. Both are cleared on the way out.
+
+        Not a nicety: `test_tester.py` enforces the same property for a run, and
+        six of its tests went red the first time discovery ran without this."""
+        result = discover_failure(FIXTURE, self.log(tmp_path))
+
+        assert result.passed is False  # it really ran
+        assert not list(FIXTURE.rglob("__pycache__"))
+        assert not list(FIXTURE.rglob(".pytest_cache"))
+
+    def test_the_cleanup_survives_a_crash_in_the_tester(self, monkeypatch, tmp_path):
+        """The `finally` is what makes it a guarantee rather than a happy path."""
+        monkeypatch.setattr(
+            "cli.Tester._run", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+
+        with pytest.raises(RuntimeError):
+            discover_failure(FIXTURE, self.log(tmp_path))
+
+        assert not list(FIXTURE.rglob("__pycache__"))
+        assert not list(FIXTURE.rglob(".pytest_cache"))
+
+    def test_the_real_testers_own_event_is_written_too(self, tmp_path):
+        """It is the real Tester's pytest invocation, not a copy of it, so the
+        Tester's own `test_run_started` lands in the log."""
+        log = self.log(tmp_path)
+        discover_failure(FIXTURE, log)
+
+        events = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
+        assert [event["agent"] for event in events if event["event"] == "test_run_started"] == [
+            "tester"
+        ]
+
+
+class TestTheCLIShape:
+    """Argument parsing only. Nothing here runs pytest or copies a directory."""
+
+    def test_one_of_repo_or_task_is_required(self, capsys):
+        with pytest.raises(SystemExit) as caught:
+            main([])
+
+        assert caught.value.code == 2
+        assert "required" in capsys.readouterr().err
+
+    def test_repo_and_task_are_mutually_exclusive(self, capsys):
+        with pytest.raises(SystemExit) as caught:
+            main(["--repo", ".", "--task", "task.json"])
+
+        assert caught.value.code == 2
+        assert "not allowed with" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("flag", ["--description", "--failure"])
+    def test_the_repo_only_flags_are_refused_with_task_rather_than_ignored(self, flag):
+        """A `task.json` already carries both fields, so one of the two would have
+        to win silently."""
+        with pytest.raises(SystemExit) as caught:
+            main(["--task", str(FIXTURE / "task.json"), flag, "x"])
+
+        assert "belong with --repo" in str(caught.value)
+
+    def test_a_missing_repo_is_caught_before_the_api_key(self, monkeypatch, tmp_path):
+        """The boundary error names the directory, not the environment."""
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        missing = tmp_path / "not_here"
+
+        with pytest.raises(SystemExit) as caught:
+            main(["--repo", str(missing), "--stub"])
+
+        assert str(missing) in str(caught.value)
+
+
+class TestARepoRunEndToEnd:
+    """`--repo` driven through `main`, with no API key and no `--failure`.
+
+    The 6.0.5 claim in one place: point it at a directory, and the failure is
+    found rather than typed. `--stub` keeps it free -- what is under test here is
+    the entrypoint's new half, and the loop below it is unchanged.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_key_and_a_scratch_cwd(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+    def test_the_failure_is_discovered_with_no_failure_flag(self, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        code = main(["--repo", str(FIXTURE), "--stub"])
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "failure  auto-discovered (1 failing test(s))" in out
+        assert "aborted_by_human" in out
+
+    def test_the_discovered_output_is_what_the_planner_would_have_been_given(
+        self, monkeypatch, tmp_path
+    ):
+        """The banner reports a count; this checks the bytes. The log's
+        `failure_discovery` event is the `failure_input` the run was built on."""
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        main(["--repo", str(FIXTURE), "--stub"])
+
+        events = [
+            json.loads(line)
+            for log in (tmp_path / "logs").glob("*.jsonl")
+            for line in log.read_text(encoding="utf-8").splitlines()
+        ]
+        discovered = next(
+            event["payload"]["output"]
+            for event in events
+            if event["event"] == "failure_discovery"
+        )
+        assert f"rootdir: {FIXTURE}" in discovered
+        assert "test_an_order_at_the_bulk_threshold_is_discounted" in discovered
+
+    def test_the_task_id_is_built_from_the_repos_own_directory_name(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        main(["--repo", str(FIXTURE), "--stub"])
+
+        assert "task id  fixture_repo_1_" in capsys.readouterr().out
+
+    def test_a_green_repo_reports_plainly_and_builds_no_task(self, capsys, tmp_path):
+        """No task is invented, nothing is copied, and the exit code is 0 --
+        "nothing is broken" is a true answer, not a failure to answer."""
+        green = tmp_path / "already_green"
+        (green / "tests").mkdir(parents=True)
+        (green / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n", encoding="utf-8")
+        (green / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+        code = main(["--repo", str(green), "--stub"])
+
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "The suite is green" in out
+        assert "no agent ran" in out
+        assert not (tmp_path / "runs").exists()
+
+    def test_an_uncollectable_suite_refuses_rather_than_inventing_a_task(self, tmp_path):
+        """Exit code 2-5: no per-test outcome set, so there is no failing test to
+        aim a plan at. The same line `summary_parsed` draws inside the loop."""
+        broken = tmp_path / "wont_collect"
+        (broken / "tests").mkdir(parents=True)
+        (broken / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n", encoding="utf-8")
+        (broken / "tests" / "test_broken.py").write_text("this is not python(\n", encoding="utf-8")
+
+        with pytest.raises(SystemExit) as caught:
+            main(["--repo", str(broken), "--stub"])
+
+        assert "without producing a per-test outcome set" in str(caught.value)
+        assert "--failure" in str(caught.value)
+
+    def test_the_failure_override_skips_discovery_entirely(self, monkeypatch, capsys, tmp_path):
+        """The escape hatch for output that is not a clean pytest run. No
+        `failure_discovery` event, because no discovery happened."""
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        main(["--repo", str(FIXTURE), "--stub", "--failure", "hand-supplied output"])
+
+        assert "failure  supplied with --failure" in capsys.readouterr().out
+        events = [
+            json.loads(line)
+            for log in (tmp_path / "logs").glob("*.jsonl")
+            for line in log.read_text(encoding="utf-8").splitlines()
+        ]
+        assert not [event for event in events if event["event"] == "failure_discovery"]
+
+    def test_the_old_task_shape_still_works(self, monkeypatch, capsys):
+        """The three fixture demos are cited as evidence throughout CLAUDE.md. A
+        documented command that no longer runs is worse than one branch here."""
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        code = main(["--task", str(FIXTURE / "task.json"), "--stub"])
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "failure  read from" in out
+        assert "aborted_by_human" in out
+
+    def test_the_real_path_still_demands_a_key_under_repo_too(self):
+        with pytest.raises(SystemExit) as caught:
+            main(["--repo", str(FIXTURE)])
+
+        assert "GEMINI_API_KEY" in str(caught.value)
+
+
+class TestWhatReachesTaskState:
+    """What `main` actually builds, captured before the loop is entered.
+
+    `run_task` is replaced with a recorder rather than driven, because the
+    question here is the entrypoint's assembly and nothing below it. It is also
+    the only way to see `task_description`: it reaches `TaskState` and no event.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_key_and_a_scratch_cwd(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+    @pytest.fixture
+    def captured(self, monkeypatch):
+        seen: list[TaskState] = []
+
+        def recorder(state, **_kwargs):
+            seen.append(state)
+            return state.model_copy(update={"status": Status.SUCCEEDED})
+
+        monkeypatch.setattr("cli.run_task", recorder)
+        return seen
+
+    def test_the_description_defaults_rather_than_being_guessed_at(self, captured):
+        """Auto-discovery automates evidence-gathering, not intent. The default
+        says only what is actually known."""
+        main(["--repo", str(FIXTURE), "--stub", "--failure", "x"])
+
+        assert captured[0].task_description == DEFAULT_DESCRIPTION
+
+    def test_a_supplied_description_wins(self, captured):
+        main(
+            [
+                "--repo",
+                str(FIXTURE),
+                "--stub",
+                "--failure",
+                "x",
+                "--description",
+                "Something specific I want fixed.",
+            ]
+        )
+
+        assert captured[0].task_description == "Something specific I want fixed."
+
+    def test_the_discovered_output_becomes_failure_input_verbatim(self, captured):
+        """Not summarised, not trimmed to the failing test, not re-rendered."""
+        main(["--repo", str(FIXTURE), "--stub"])
+
+        failure_input = captured[0].failure_input
+        assert failure_input.startswith("============================= test session starts")
+        assert f"rootdir: {FIXTURE}" in failure_input
+        assert failure_input.rstrip().endswith("=")
+
+    def test_the_task_shape_still_reads_both_fields_from_the_file(self, captured):
+        hand = json.loads((FIXTURE / "task.json").read_text(encoding="utf-8"))
+
+        main(["--task", str(FIXTURE / "task.json"), "--stub"])
+
+        assert captured[0].task_description == hand["task_description"]
+        assert captured[0].failure_input == hand["failure_input"]
+
+    def test_the_run_directory_is_a_copy_of_the_repo_that_was_named(self, captured):
+        main(["--repo", str(FIXTURE), "--stub", "--failure", "x"])
+
+        state = captured[0]
+        assert Path(state.repo_path).name == state.task_id
+        assert (Path(state.repo_path) / "pricing" / "discounts.py").exists()
 
 
 class TestAStubRunEndToEnd:

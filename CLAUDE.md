@@ -65,6 +65,7 @@ Build order. Phases 1–2 make **zero API calls**.
 | 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | done — 3A (client, Planner, Implementer, `cli.py`), 3A.1 (Anthropic → Gemini), 3B (Reviewer, `--stub`) |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | done — evidence packaging and retry-with-evidence were already built in 2.3/3A; 4A adds the escalation output, 4B `fixture_repo_2`, 4C the run against it (green on attempt 1, trap did not spring) |
 | 5 | Fixture repo 3, Reviewer-rejection scenario, saved transcripts, README update — `fixture_repo_2` moved into Phase 4, which needed it for the recovery run | in progress — 5A (fixture 3, `probe_reviewer.py`), 5.1 (probe pass **8/8**, end-to-end run), 5B (`probe_implementer.py`, **5/5**) |
+| 6 | Export, measure, then fix what actually breaks — generalise the CLI, then run against real repos and let the failures pick the next task | in progress — 6.0.5 + 6.1 done (auto-discovery, `--repo`) |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
 
@@ -115,6 +116,8 @@ Fixtures are **plain directories with no git**. `tasks/fixture_repo_1/` is ordin
 
 At run start the harness copies the fixture to `runs/<task_id>/` with `shutil.copytree`, ignoring `__pycache__` and `.pytest_cache`. All work — apply, test, reset — happens in the copy. The fixture directory itself is never written to.
 
+**One qualification, added in 6.0.5 and enforced rather than merely stated.** `cli.discover_failure` runs a pytest subprocess *inside* the target repo, before the copy, so pytest writes `__pycache__` and `.pytest_cache` there during that run. It clears both on the way out, in a `finally`, and the repo is left as it was found. The claim above is therefore intact — and it is intact because `test_tester.py` already enforces it: `test_a_run_leaves_no_caches_in_the_fixture` and `test_the_fixture_directory_is_untouched_by_a_run` both went red the first time discovery ran without the cleanup, which is how the omission was caught rather than shipped. The residue worth naming: a *pre-existing* `.pytest_cache` in the target repo is deleted, so pytest's own `--lf` state there is lost. That is regenerable derived data, and the pre-clear is load-bearing — a stale cache is what produces a phantom result.
+
 **Baseline reset = delete `runs/<task_id>/` and re-copy from the fixture.** No git, no patch reversal, no cleanup logic to get wrong. `runs/` is gitignored.
 
 This replaces an earlier `git checkout . && git clean -fd` design. A copy is simpler than a nested git repo inside the harness repo, needs no submodule or init script, and makes "identical ground" a property of the filesystem rather than of git's index state.
@@ -132,7 +135,11 @@ Every fixture repo needs its own `pytest.ini` for the same reason.
 
 ### task.json
 
-`task.json` contains exactly two hand-authored fields: `task_description` and `failure_input`. Nothing else. The harness does not run pytest to discover the failure before planning — that would put the Tester ahead of the Planner and violate the stated order of operations. The failure text is an input to the task, not a product of it.
+`task.json` contains exactly two hand-authored fields: `task_description` and `failure_input`. Nothing else.
+
+**As of 6.0.5 a `task.json` is no longer the only way in, and the rule it was built on has been made precise rather than dropped.** The original wording said the harness does not run pytest to discover the failure before planning, because that would put the Tester ahead of the Planner. What that rule actually protects is the *loop's order of operations*: the Tester must not be folded into the Plan → Implement → Review → Test sequence out of order. `discover_failure` runs before `TaskState` is constructed and before `run_task` is called, so it is not in that sequence at all — it is setup, not planning. Inside the loop, Plan still runs first, always. See "Auto-discovering the failure" below for the whole argument.
+
+The failure text is still an input to the task rather than a product of the loop. What changed is who types it.
 
 `failure_input` is the **real, verbatim** pytest output, captured by running the suite — never written from memory and never cleaned up. That includes the platform banner, the pytest and plugin version numbers, and the machine-specific absolute `rootdir:` line. **Do not sanitize it here, and do not sanitize it in future fixtures.**
 
@@ -144,15 +151,48 @@ The stale `rootdir:` is the clearest case. It points at `tasks/fixture_repo_1`, 
 
 `task_id` is **generated by the harness**, not read from `task.json`. It identifies a *run*, not a task: it is both the `runs/` directory name and the log filename, so two runs against the same fixture must produce different ids.
 
-Format: `<fixture_dir_name>_<UTC timestamp>` — e.g. `fixture_repo_1_20260814T120000Z`. The timestamp is compact rather than full ISO 8601 because it becomes a path segment and ISO's colons are illegal in Windows filenames. Built by `make_task_id()` in `harness/state.py`.
+Format: `<repo_dir_name>_<UTC timestamp>` — e.g. `fixture_repo_1_20260814T120000Z`. The timestamp is compact rather than full ISO 8601 because it becomes a path segment and ISO's colons are illegal in Windows filenames. Built by `make_task_id()` in `harness/state.py`.
 
-CLI:
+**6.1 checked `make_task_id` for a fixture-era assumption and found the assumption was the caller's, not the function's.** It takes a directory name and appends a timestamp; nothing in it knows what a fixture is. The parameter was named `fixture_dir_name`, which was a false claim once any repo could be passed, so it is now `repo_dir_name` — a rename and a docstring, no logic. What *was* genuinely broken was the call site: `--repo .` would have made `.name` the string `"."` and the run directory a hidden `runs/._2026...`, and a trailing separator or a filesystem root would have emptied it. `cli.resolve_repo` resolves the path before `.name` is taken, and `cli.repo_dir_name` falls back to `"repo"` for a nameless root. That belongs in the caller: a directory *name* is this function's input, not a path it should be parsing.
+
+**`prepare_run_dir` needed nothing.** It `copytree`s whatever path it is handed and ignores the two cache directories; it has never known or cared that the path was one of three fixtures. Checked, and deliberately not touched. (A real repo will bring `.git` and `.venv` along with it — that is a Phase 6.2 finding waiting to happen, not a fixture-era assumption, so it is recorded here and left alone.)
+
+CLI, as of 6.1:
 
 ```
-python cli.py --task tasks/fixture_repo_1/task.json [--stub]
+python cli.py --repo <any/path> [--description "<text>"] [--failure "<verbatim pytest output>"] [--stub]
+python cli.py --task tasks/fixture_repo_1/task.json [--stub]          # still works
 ```
 
-No YAML. JSON only. `cli.py` reads the task file, generates the `task_id`, prepares the run directory, builds the `TaskState`, constructs the four agents, and supplies the human at the gate. It validates that `task.json` holds *exactly* the two hand-authored fields at the boundary — a typo'd key should name the file it is in, not surface three steps later as a contract violation inside an agent.
+`--repo` and `--task` are mutually exclusive and one is required. `--description` and `--failure` belong with `--repo` and are **refused** rather than ignored when passed with `--task` — a `task.json` already carries both fields, so one of the two would have to win silently, and a flag that is accepted and then discarded is worse than one that is rejected.
+
+`--task` is kept working rather than kept alive: the three fixture demos are cited as evidence throughout this file, and a documented command that no longer runs is worse than one flag's worth of branching in `main`.
+
+No YAML. JSON only. `cli.py` resolves the repo, discovers or reads the failure, generates the `task_id`, prepares the run directory, builds the `TaskState`, constructs the four agents, and supplies the human at the gate. It validates that `task.json` holds *exactly* the two hand-authored fields at the boundary — a typo'd key should name the file it is in, not surface three steps later as a contract violation inside an agent.
+
+### Auto-discovering the failure
+
+`cli.discover_failure(repo_path, event_log) -> TestResult`. Task 6.0.5. Before it, a human hand-pasted verbatim pytest output into a `task.json`; a CLI coding tool does not ask for that, it looks at the repo and finds out what is wrong itself.
+
+**Why this is not the Tester jumping the queue.** The Phase 1 rule bans running pytest to discover the failure *as part of planning the fix*. This runs before `TaskState` exists and before `run_task` is called — it is not in the Plan-Implement-Review-Test sequence at all. Setup, not planning. The loop's order is untouched, and so are the agents, the contracts, and the six invariants: 6.0.5 and 6.1 together changed `cli.py`, plus a two-line rename in `state.py`.
+
+**It runs against the target repo, not the run directory, and that is the load-bearing choice.** `failure_input`'s rule is that it is verbatim — banner, plugin versions, and the machine-specific absolute `rootdir:` line that points at the *source* repo while the Tester will later work in `runs/<task_id>/`. This file calls that stale path "the clearest case" of noise worth keeping. Discovering against the copy would produce a correct `rootdir:` and quietly sanitize exactly the discrepancy a Planner is supposed to be robust to — a cleaner input than any hand-captured fixture ever had, which is the opposite of the point.
+
+**It calls `Tester._run`, not `Tester.run`, and that is a decision rather than a shortcut.** `Agent.run` takes a `TaskState`, and `TaskState` requires `failure_input` at construction — which is the value this function exists to compute. Driving the public entry point would mean building a state around a placeholder failure and then overwriting it: a lie told to get past a constructor, and one that would sit in the log. `_run` *is* the pytest-invocation logic — clear caches, log `test_run_started`, invoke pytest, report. The contract check skipped along the way asserts only that `repo_path` is present, which is the one argument being passed by hand. `_clear_caches` is imported from the same module for the same reason: a second copy of those two directory names in `cli.py` would be free to drift from the one the loop uses.
+
+**Three outcomes, and only one of them is a task:**
+
+| pytest exit code | What it means | What `main` does |
+| --- | --- | --- |
+| 0 | green | report plainly, **exit 0**, invent nothing |
+| 1 | tests failed | `failure_input = result.stdout`, verbatim |
+| 2–5, or the timeout's −1 | no per-test outcome set | refuse, and point at `--failure` |
+
+The green case exits **0**, not 1: "nothing is broken" is a true answer to the question that was asked, not a failure to answer it. Nothing is copied to `runs/` and no API call is made.
+
+The last row draws the same line `summary_parsed` draws inside the loop, where it halts with `escalated_broken_suite` rather than retrying, and for the same reason — another diff cannot fix a suite that will not collect. Refusing here saves a stack of API calls that were going to be spent on an unanswerable question, and `--failure` is the documented way through for a failure that is not a clean pytest run.
+
+**`--description` defaults and does not guess.** `DEFAULT_DESCRIPTION` is a generic `"Fix the failing test(s) in this repository."`. Auto-discovery automates *evidence-gathering*, not intent; a default that guessed at intent would be inventing the half a human still owns.
 
 **The terminal gate takes the diff and nothing else**, per the ownership table. The note under "The control loop" imagined `cli.py` showing the plan and the verdict alongside it. The Reviewer is real as of 3B, so the old reason to wait has expired — but the reason to stay narrow has not: the callback is built before `run_task` runs and so before any plan or verdict exists, and widening to `approve(diff, review)` would change `run_task`'s signature for a display convenience. Do it when someone at the gate actually wants it, not because it became possible. An unreadable stdin (a pipe, a CI job, `< /dev/null`) is read as a refusal: a gate whose failure mode is "approve" is not a gate.
 
@@ -621,6 +661,14 @@ Written by the loop with `agent="harness"`, in the order they can appear:
 | `suite_not_collectable` | `exit_code`, `traceback` |
 | `run_finished` | `status`, `attempt_count`, `reason` |
 
+One more, written by `cli.py` rather than by the loop, and before the run starts:
+
+| Event | Payload |
+| ----- | ------- |
+| `failure_discovery` | `repo_path`, `passed`, `exit_code`, `failed_tests`, `output` |
+
+It exists to keep the log self-contained, which is a property this file claims and 6.0.5 would otherwise have broken. For a `--task` run, `failure_input` is committed in `task.json` and a reader can go and look; for a discovered one, the log is the **only** place it exists — `run_started` does not carry it and no agent event does. It is written on the green path too, deliberately breaking the "a passing check logs nothing" rule: that rule is about loop checks whose success is already implied by the next event, and here nothing follows to imply anything.
+
 Two rules shape the set. **Every halt goes through `_halt`**, so `run_finished` appears exactly once per run and always carries the status; the diagnostic events before it carry the payloads it cannot. **A passing check logs nothing** — there is no `scope_check_passed`, because the `diff_rendered` that follows already proves it passed, and an event per non-event is noise in an append-only log.
 
 `test_failed` records the harness's *decision* to route back, not the `TestResult` — that is already on the Tester's `agent_produced`, and re-logging it would put the same object in the log twice.
@@ -1068,7 +1116,7 @@ A parse failure must not become an agent retry. The loop's `evidence` says *the 
 | Test execution | `subprocess` running `pytest`                                     |
 | Event log      | append-only `.jsonl`, one file per run                            |
 | Baseline reset | delete `runs/<task_id>/`, re-copy fixture via `shutil.copytree`   |
-| Entrypoint     | `python cli.py --task <path/to/task.json> [--stub]`               |
+| Entrypoint     | `python cli.py --repo <any/path> [--description "<text>"] [--failure "<output>"] [--stub]`, or the original `--task <path/to/task.json>` |
 
 The Tester runs the **whole** fixture suite, not just the target test — "fix it without breaking anything else" is only verifiable against the full suite. Before invoking pytest it clears `__pycache__` and `.pytest_cache` in the run directory. Stale caches cause phantom results.
 
@@ -1134,20 +1182,53 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 5 — **in progress. All three probe passes are complete and recorded.** The Reviewer probe scored **8/8**, the Implementer probe **5/5**, and the conditional end-to-end `fixture_repo_3` run went green on attempt 1. Both halves of retry-on-failure are now measured directly; see "What the retry mechanism proved, together".
-**Last completed:** `probe_implementer.py`, run and recorded. Suite is **432 tests, all passing, 176s** — the count is unchanged, because `pytest.ini`'s `norecursedirs` keeps `tasks/` out of collection and nothing in `tests/` imports the probe.
+**Phase:** 6 — **in progress. 6.0.5 and 6.1 are built, and the loop was not touched.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
+**Last completed:** Tasks 6.0.5 (auto-discover the failure) and 6.1 (generalise the CLI), built together in one session because both change nothing but `cli.py`'s argument handling and splitting them would have been two commits touching the same forty lines. Suite is **464 tests, all passing, 219s** — up from 432; the 32 new ones are all in `test_cli.py` (66 → 98).
+
+**The acceptance run is spent and it passed. Three calls, `succeeded` on attempt 1** — `transcripts/fixture_repo_1_20260909T133925Z.jsonl`, run as `python cli.py --repo tasks/fixture_repo_1` with no `--failure` flag and no `task.json` consulted at any point.
+
+**The strongest single line of evidence is not the status, it is the diff.** The rendered diff is **byte-identical** to the one from `transcripts/fixture_repo_1_20260823T064826Z.jsonl`, the known-good run driven from the hand-typed `task.json` two weeks earlier. Same `target_files` (`pricing/discounts.py`), same one-character fix (`>` → `>=` in `tier_for`), same call count, same attempt. Auto-discovered evidence and hand-typed evidence put the Planner and the Implementer in the same place, and that is checkable rather than asserted: compare `diff_rendered` across the two transcripts.
+
+The event order in the log is worth reading once, because it is the whole safety argument made visible — `test_run_started` and `failure_discovery` appear at attempt 0 **before** `run_started`, and the Planner's `llm_request` is the first thing inside the run. Discovery is setup; the loop still plans first.
+
+### 6.0.5 + 6.1 — what changed, and how it was verified
+
+**New CLI shape.** `python cli.py --repo <any/path> [--description "<text>"] [--failure "<output>"] [--stub]`. `--task tasks/fixture_repo_N/task.json` still works and is tested. The two are mutually exclusive, one is required, and `--description`/`--failure` with `--task` is refused rather than ignored. Argued in full under "task_id" and "Auto-discovering the failure".
+
+**New in `cli.py`:** `discover_failure`, `resolve_repo`, `repo_dir_name`, `build_parser`, `DEFAULT_DESCRIPTION`, `UNNAMED_REPO`, and the `failure_discovery` event. **In `state.py`:** `make_task_id`'s parameter renamed `fixture_dir_name` → `repo_dir_name`, plus its docstring. That is the entire diff outside `cli.py` and `test_cli.py`. The loop, the four agents, the contracts, the evidence types, and the six invariants are untouched — `git diff --stat` is the check, not this sentence.
+
+**The failure text itself, diffed line by line.** Auto-discovery against `tasks/fixture_repo_1` was compared against the `failure_input` a human captured into `task.json` in Phase 1.3 — both in isolation before the run, and from the real run's own `failure_discovery` event afterwards. Both give the same answer. **Three lines differ out of thirty, and neither difference is something discovery did:**
+
+- `plugins: anyio-4.14.2` — present in the discovered output, absent from `task.json`. `anyio` arrived as a transitive dependency of `google-genai` in 3A.1, a week *after* the fixture was captured. Confirmed by running `python -m pytest` by hand in the fixture directory: a hand capture taken today prints the same line. The committed `task.json` is the stale one.
+- `in 0.23s` vs `in 0.37s` — wall clock.
+
+Everything else matches character for character, **including `rootdir: D:\Agentic_Project1\mach\tasks\fixture_repo_1`** — the stale path that points at the source repo rather than the run directory, which this file calls the clearest case of noise worth keeping. That is the evidence the discovery runs against the target repo rather than the copy, and it is pinned in `test_it_reproduces_the_hand_captured_failure_input` with both exempt lines named in the docstring, so the claim cannot quietly weaken later.
+
+**A property was found to be broken and fixed before it shipped, which is worth recording as the process working.** The first full-suite run after discovery landed came back **6 failed** — all in `test_tester.py`, all one cause: discovery runs pytest *inside* the target repo, pytest writes `__pycache__` and `.pytest_cache` there, and `test_a_run_leaves_no_caches_in_the_fixture` and `test_the_fixture_directory_is_untouched_by_a_run` assert exactly that this never happens. The design note written *before* the run had called this "one cost, stated rather than hidden" — which was wrong, because the cost was not being paid to anyone, it was breaking an invariant the suite already enforced. `discover_failure` now clears both on the way out in a `finally`, two tests pin it (including one that kills the Tester mid-run), and the full suite is green. **The general lesson is the project's own: an argued-for cost is worth checking against the test suite before it is written down as acceptable.**
+
+**What else was verified, all without a key:** `--repo` driven end to end through `main` under `--stub` (discovery, banner, task_id from the repo's own directory name, and the discovered bytes landing in `TaskState.failure_input` verbatim); a green repo reporting plainly and exiting 0 with nothing copied to `runs/`; an uncollectable suite refused rather than turned into a task; `--failure` skipping discovery entirely; `--description` defaulting and being overridable; `--repo .` and trailing separators resolving to real directory names; and the old `--task` shape still reading both fields from the file.
+
+**What 6.1 deliberately did not do.** `prepare_run_dir` was checked and left alone — it `copytree`s whatever it is handed and has never known about fixtures. It will copy `.git` and `.venv` out of a real repo, which is a 6.2 finding waiting to happen rather than a fixture-era assumption, and per Phase 6's governing rule that is a candidate, not a commitment, until 6.2 produces it.
+
+**The rule governing the rest of this phase, restated because it is easy to lose:** build nothing beyond 6.1 until 6.2 has actually run and said what broke. Localized edits, replanning, retrieval before planning — all candidates, none commitments. Same discipline as the fixture rulings: do not engineer a fix for a failure you are imagining.
 
 (An earlier run in the same session failed one test in `TestGeneratorsAgainstTheRealTester`, then a re-run failed a *different* one in the same class, with the class taking 662s for five tests. Both pass in isolation in ~6s and the clean full run is green. That is the contention signature the note at the end of this section describes — recorded here because it recurred and cost time to rule out, not because anything changed.)
 
-**The next action, and the one command that is it** — one call, no fetch, because the plan is lifted from a saved fixture-1 transcript:
+**The next action: Task 6.2.** One real run against one small, real, public Python repo — 10–40 files, a utility library is ideal — with a genuinely failing test, introduced by hand the same way the three fixtures' bugs were. Capture nothing: `--repo` finds it now.
 
 ```bash
-python probe_implementer.py
+python cli.py --repo <path/to/some/real/repo>
 ```
 
-It answers a different question from the Reviewer probes and shares nothing with them, so the order between them is free. Read "Measuring the retry path directly" and especially "What the probe measures and what it cannot" before reading its output: assertion 3 passing does **not** show the Implementer read the evidence, and the script prints that caveat beside every row.
+**Run it and do not help it along.** It is a probe in the same spirit as `probe_reviewer.py` and `probe_implementer.py` — a measurement, not a demo you are hoping goes well, and a failure is exactly as valuable as a success. Record: whether the Planner's prompt blew past a reasonable size and at what file count; whether it succeeded, retried, or escalated, and why specifically; and if it failed, whether the failure is the *kind* predicted (context size) or something else entirely — a fixture-specific assumption in the prompts, a repo layout the `pytest.ini` trick does not handle, an import structure whole-file replacement breaks on.
 
-The first spends one call and caches `probe_plan.json`. **Read the plan it prints before running the second.** If its steps name the mechanism as a check inside `_regular_plural`, probes 6 and 7 are valid controls as written and the second command runs unchanged. If the plan puts the rule somewhere else — inside `pluralize`, or via a different construct — then 6 and 7 are no longer faithful to it, and the `correct` and `correct_by_regex` builders must be adjusted to match the plan's mechanism before the other eight calls are spent. **That inspection gap is the entire reason `--fetch-plan` is a separate mode. Do not collapse the two into one command.**
+**Do it 2–3 times against different small repos before deciding anything.** One data point risks over-fitting the next move to a fluke. Then, and only then, pick exactly one task from 6.3's table based on what 6.2 actually produced. **Do not pre-select from that table.**
+
+Two things already known to be waiting: `prepare_run_dir` will `copytree` a real repo's `.git` and `.venv` (see "task_id"), and `list_repo_files` feeds every file into the Planner's prompt. Both are 6.2 findings to be *observed*, not fixed in advance.
+
+### Phase 5, complete as recorded
+
+**All three probe passes are complete.** The Reviewer probe scored **8/8**, the Implementer probe **5/5**, and the conditional end-to-end `fixture_repo_3` run went green on attempt 1. Both halves of retry-on-failure are measured directly; see "What the retry mechanism proved, together".
 
 **5.1 — the probe pass and the run it authorised. Both spent; 12 calls.** The pass scored **8/8** (`transcripts/probe_20260902T061724Z.jsonl`). Probe 1 was rejected, which under the rule settled in advance authorised the end-to-end run — and that run went **green on attempt 1 in three calls** (`transcripts/fixture_repo_3_20260902T062218Z.jsonl`).
 

@@ -1,10 +1,27 @@
-"""The entrypoint: `python cli.py --task tasks/fixture_repo_1/task.json [--stub]`.
+"""The entrypoint: `python cli.py --repo <any/path> [--description "<text>"]`.
 
-Everything the control loop needs is built here and nowhere else -- reading the
-task file, generating the `task_id`, preparing the run directory, constructing
-the initial `TaskState`, choosing the four agents, and supplying a human at the
-approval gate. `run_task` was written to be driven by exactly this and by nothing
-else.
+Everything the control loop needs is built here and nowhere else -- resolving the
+repo, discovering or reading the failure, generating the `task_id`, preparing the
+run directory, constructing the initial `TaskState`, choosing the four agents, and
+supplying a human at the approval gate. `run_task` was written to be driven by
+exactly this and by nothing else.
+
+**The repo is any directory now, and the failure is found rather than typed.**
+`--repo` points at a repository on disk; `discover_failure` runs the suite once
+against it, before `TaskState` exists and before the loop starts, and the verbatim
+output becomes `failure_input`. A green suite is reported and the run stops --
+there is nothing to fix and the harness does not invent a task. `--description`
+is optional and defaults to a generic sentence, because auto-discovery automates
+evidence-gathering, not intent. `--failure` stays available as an override for
+output that is not a clean pytest run, or to pin the input while testing.
+
+**`--task tasks/fixture_repo_N/task.json` still works**, unchanged: the repo is
+that file's own directory and both hand-authored fields come from it. The three
+fixture demos are cited as evidence throughout CLAUDE.md, and a documented command
+that no longer runs is worse than one flag's worth of branching here.
+
+**Nothing below the entrypoint moved.** Not the loop, not the four agents, not
+the contracts, not the six invariants. Inside the loop, Plan still runs first.
 
 **What this wires, at 3B.** All three LLM-backed agents are real: Planner,
 Implementer, and now Reviewer. The Tester has been real since Phase 1. So
@@ -51,7 +68,7 @@ from harness.agents.implementer import Implementer
 from harness.agents.planner import Planner
 from harness.agents.reviewer import Reviewer
 from harness.agents.stubs import StubImplementer, StubPlanner, StubReviewer
-from harness.agents.tester import Tester
+from harness.agents.tester import PYTEST_TESTS_FAILED, Tester, _clear_caches
 from harness.events import EventLog
 from harness.llm import LLMClient, LLMError
 from harness.loop import MAX_ATTEMPTS, run_task
@@ -63,11 +80,21 @@ from harness.state import (
     ReviewVerdict,
     Status,
     TaskState,
+    TestResult,
     make_task_id,
 )
 from harness.workspace import list_repo_files, prepare_run_dir, read_repo_file
 
 RULE = "=" * 78
+
+#: What `task_description` becomes when `--description` is omitted. Generic on
+#: purpose: auto-discovery automates *evidence*, not intent, and a default that
+#: guessed at intent would be inventing the half a human still owns.
+DEFAULT_DESCRIPTION = "Fix the failing test(s) in this repository."
+
+#: Fallback for the directory-name half of a `task_id`. Only reachable when the
+#: resolved repo path is a filesystem root, whose `.name` is the empty string.
+UNNAMED_REPO = "repo"
 
 # What the stub Reviewer says on every attempt. One entry per possible attempt is
 # built from this: `StubReviewer` raises `ScriptExhausted` when its script runs
@@ -102,6 +129,121 @@ def read_task_file(task_file: Path) -> dict[str, str]:
         )
 
     return loaded
+
+
+# -- the bootstrap: finding the failure instead of being handed it -----------
+#
+# Task 6.0.5. Before this, a human hand-pasted `failure_input` into a `task.json`.
+# A CLI coding tool does not ask for that; it looks at the repo and finds out
+# what is wrong itself.
+#
+# **This does not reorder the loop, and the distinction is the whole safety
+# argument.** The Phase 1 rule is that the harness must not run pytest to
+# discover the failure *as part of planning the fix* -- i.e. the Tester must not
+# get folded into the Plan-Implement-Review-Test sequence out of order. This runs
+# before `TaskState` exists and before `run_task` is called, so it is not in that
+# sequence at all. It is setup, not planning. Inside the loop, Plan still runs
+# first, always.
+#
+# **It runs against the target repo, not the run directory**, and that is
+# deliberate rather than incidental. `task.json`'s rule is that `failure_input`
+# is verbatim -- banner, plugin versions, and the machine-specific absolute
+# `rootdir:` line that points at the *source* repo while the Tester will later
+# work in `runs/<task_id>/`. CLAUDE.md calls that stale path "the clearest case"
+# of noise worth keeping, because a Planner that trips over it has a defect worth
+# finding. Discovering against the copy would quietly sanitize exactly that, and
+# produce a cleaner input than any hand-captured fixture ever had.
+#
+# **Running pytest there writes caches, and the caches are cleared again after.**
+# The Tester clears `__pycache__` and `.pytest_cache` before it invokes pytest,
+# and pytest writes them back during the run. Left alone, that breaks a property
+# the project actually enforces rather than merely states -- `test_tester.py`'s
+# `test_a_run_leaves_no_caches_in_the_fixture` and
+# `test_the_fixture_directory_is_untouched_by_a_run` both assert it, and six
+# tests went red the first time this ran without the cleanup. So discovery clears
+# them on the way out too, in a `finally`, and the target repo is left as it was
+# found.
+#
+# The alternative was `-p no:cacheprovider`, which would make the discovery
+# invocation differ from the Tester's real one -- and then the discovered text
+# would not be the text the Tester produces, which is the entire point of reusing
+# it. The residue that remains is honest and worth naming: a pre-existing
+# `.pytest_cache` in the target repo is deleted, so pytest's own `--lf` state
+# there is lost. That is regenerable derived data, and the pre-clear is
+# load-bearing -- a stale cache is what produces a phantom result.
+
+
+def discover_failure(repo_path: str | Path, event_log: EventLog) -> TestResult:
+    """Run the real Tester's pytest invocation once against `repo_path`.
+
+    Returns what pytest said. Deciding whether that is a task -- green, a clean
+    red, or a suite that never produced a per-test outcome set -- belongs to the
+    caller, the same split as `tester_failure_from`: the Tester reports, the
+    harness rules on the report.
+
+    **It calls `Tester._run` rather than `Tester.run`, and that is not laziness.**
+    `Agent.run` takes a `TaskState`, and `TaskState` requires `failure_input` at
+    construction -- which is the value this function exists to compute. Driving
+    the public entry point would mean building a state around a placeholder
+    failure and then overwriting it, which is a lie told to get past a
+    constructor. `_run` is the pytest-invocation logic itself: clear the caches,
+    log `test_run_started`, invoke pytest, report. The contract check skipped
+    along the way asserts that `repo_path` is present, which is the one argument
+    being passed by hand.
+
+    The `failure_discovery` event keeps the log self-contained. For a `--task`
+    run, `failure_input` is committed in `task.json` and the log can point at it;
+    for a discovered one, the log is the only place it exists.
+
+    `_clear_caches` is imported for the same reason `_run` is called: it is the
+    Tester's own definition of which directories are cache, and a second copy of
+    those two names here would be free to drift from the one the loop uses.
+    """
+    try:
+        result = Tester(event_log)._run(repo_path=str(repo_path))
+    finally:
+        # In a `finally` so a timeout or a crashed subprocess still leaves the
+        # target repo as it was found.
+        _clear_caches(Path(repo_path))
+
+    event_log.append(
+        attempt=0,
+        agent="harness",
+        event="failure_discovery",
+        payload={
+            "repo_path": str(repo_path),
+            "passed": result.passed,
+            "exit_code": result.exit_code,
+            "failed_tests": result.failed_tests,
+            # Verbatim, and the same bytes that become `failure_input`.
+            "output": result.stdout,
+        },
+    )
+    return result
+
+
+def resolve_repo(path: Path) -> Path:
+    """The repo directory as an absolute path, or a boundary error naming it.
+
+    Resolved rather than used as given, because `.name` becomes half the
+    `task_id` and therefore a directory name under `runs/` and a log filename.
+    `--repo .` would otherwise produce a hidden `runs/._2026...`, and `--repo
+    ../thing/` an empty-named one. `make_task_id` takes a directory *name*; the
+    caller owes it one, and this is the caller.
+    """
+    resolved = path.expanduser().resolve()
+    if not resolved.is_dir():
+        raise SystemExit(f"no repository directory at {path}")
+    return resolved
+
+
+def repo_dir_name(repo_dir: Path) -> str:
+    """The directory-name half of the `task_id`.
+
+    The fallback is only reachable for a filesystem root -- `Path("D:/").name` is
+    `""` -- which would otherwise make every id start with an underscore.
+    """
+    return repo_dir.name or UNNAMED_REPO
 
 
 def stub_targets(repo_path: str) -> list[str]:
@@ -548,16 +690,53 @@ def report(state: TaskState, log_path: str | Path) -> None:
     print(f"\n{RULE}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI shape. Two mutually exclusive ways to say which repo to work on.
+
+    `--repo` is the shape the project is generalising toward: point it at any
+    repository on disk and let the harness find the failure itself. `--task` is
+    the original fixture shape, kept working rather than kept alive -- the three
+    fixture demos are cited as evidence throughout CLAUDE.md, and a command in a
+    document that no longer runs is worse than one flag's worth of branching.
+    """
     parser = argparse.ArgumentParser(
         prog="cli.py",
-        description="Fix one failing test in a fixture repo, with a human at the gate.",
+        description="Fix the failing test(s) in a repository, with a human at the gate.",
+    )
+
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--repo",
+        type=Path,
+        help=(
+            "path to any repository on disk. Its failure is discovered by running "
+            "the suite once, before the loop starts."
+        ),
+    )
+    source.add_argument(
+        "--task",
+        type=Path,
+        help=(
+            "path to a fixture's task.json, e.g. tasks/fixture_repo_1/task.json. "
+            "The original shape: the repo is the file's own directory, and both "
+            "task_description and failure_input are read from it."
+        ),
+    )
+
+    parser.add_argument(
+        "--description",
+        help=(
+            "what you want fixed, in a sentence or two. Defaults to a generic "
+            f"{DEFAULT_DESCRIPTION!r}. --repo only."
+        ),
     )
     parser.add_argument(
-        "--task",
-        required=True,
-        type=Path,
-        help="path to a fixture's task.json, e.g. tasks/fixture_repo_1/task.json",
+        "--failure",
+        help=(
+            "verbatim pytest output to use instead of discovering it. For a "
+            "failure that is not a clean pytest run, or to pin the input while "
+            "testing. --repo only."
+        ),
     )
     parser.add_argument(
         "--stub",
@@ -568,17 +747,31 @@ def main(argv: list[str] | None = None) -> int:
             "the approval gate stay real, and the run cannot succeed."
         ),
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    task_file: Path = args.task
-    fixture_path = task_file.parent
-    task = read_task_file(task_file)
 
-    # Built before anything is copied, so a missing API key costs nothing. The
-    # alternative is discovering it after a copytree and a Planner call. Under
-    # --stub no agent holds a client, so none is built -- constructing one would
-    # buy nothing and would cost the flag its main use, which is running when
-    # there is no key or no quota left.
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    # Rejected rather than ignored. A `task.json` already carries both fields, so
+    # one of the two would have to win silently, and a flag that is accepted and
+    # then discarded is worse than one that is refused.
+    if args.task is not None and (args.description is not None or args.failure is not None):
+        raise SystemExit(
+            "--description and --failure belong with --repo; a task.json already "
+            "carries task_description and failure_input"
+        )
+
+    task = read_task_file(args.task) if args.task is not None else None
+    repo_dir = resolve_repo(args.task.parent if task is not None else args.repo)
+
+    # Built before anything is copied *and before the suite is run*, so a missing
+    # API key costs nothing. The alternative is discovering it after a pytest
+    # subprocess, a copytree, and a Planner call -- and on a real repo that
+    # subprocess is the slowest thing here, not the cheapest. Under --stub no
+    # agent holds a client, so none is built: constructing one would buy nothing
+    # and would cost the flag its main use, which is running when there is no key
+    # or no quota left.
     client = None
     if not args.stub:
         try:
@@ -586,9 +779,67 @@ def main(argv: list[str] | None = None) -> int:
         except LLMError as exc:
             raise SystemExit(str(exc)) from exc
 
-    task_id = make_task_id(fixture_path.name)
-    repo_path = prepare_run_dir(task_id, fixture_path)
+    # Before `prepare_run_dir` now, because discovery needs somewhere to log and
+    # runs against the target repo rather than the copy. `EventLog` creates the
+    # directory but not the file, so a run that stops at "nothing to fix" leaves
+    # no empty log behind.
+    task_id = make_task_id(repo_dir_name(repo_dir))
     event_log = EventLog(task_id)
+
+    if task is not None:
+        task_description = task["task_description"]
+        failure_input = task["failure_input"]
+        failure_source = f"read from {args.task}"
+    else:
+        task_description = args.description or DEFAULT_DESCRIPTION
+
+        if args.failure is not None:
+            failure_input = args.failure
+            failure_source = "supplied with --failure"
+        else:
+            result = discover_failure(repo_dir, event_log)
+
+            if result.passed:
+                # Reported plainly, and no task invented. Exit 0: "nothing is
+                # broken" is a true answer to the question that was asked, not a
+                # failure to answer it.
+                print(
+                    f"{RULE}\nrepo     {repo_dir}\ntask id  {task_id}\n{RULE}\n"
+                    "The suite is green -- there is no failing test to fix, so no "
+                    "task was built and no agent ran.\n\n"
+                    "  Nothing was copied to runs/, and no API call was made.\n"
+                    "  To drive the harness anyway, supply the failure yourself "
+                    "with --failure.\n"
+                    f"{RULE}"
+                )
+                return 0
+
+            if result.exit_code != PYTEST_TESTS_FAILED:
+                # Exit codes 2-5 and the timeout: the suite never produced a
+                # per-test outcome set, so there is no failing test to aim a plan
+                # at. `summary_parsed` draws this same line inside the loop, where
+                # it halts with `escalated_broken_suite` rather than retrying, and
+                # the reasoning is identical -- another diff cannot fix a suite
+                # that will not collect. Refusing here costs a stack of API calls
+                # that were going to be spent on an unanswerable question.
+                raise SystemExit(
+                    f"pytest exited {result.exit_code} in {repo_dir} without "
+                    "producing a per-test outcome set -- a collection error, a "
+                    "usage error, a timeout, or nothing collected. There is no "
+                    "failing test to hand the Planner. Fix the suite, or supply "
+                    "the output yourself with --failure.\n\n"
+                    + (result.traceback or result.stdout).strip()
+                )
+
+            # Verbatim, exactly as every hand-captured task.json is: banner,
+            # plugin versions, and a rootdir line that points at this repo rather
+            # than at the run directory the Tester will later work in.
+            failure_input = result.stdout
+            failure_source = (
+                f"auto-discovered ({len(result.failed_tests)} failing test(s))"
+            )
+
+    repo_path = prepare_run_dir(task_id, repo_dir)
 
     if args.stub:
         # Built from the prepared run directory, which is why this happens here
@@ -602,21 +853,24 @@ def main(argv: list[str] | None = None) -> int:
     state = TaskState(
         task_id=task_id,
         repo_path=repo_path,
-        task_description=task["task_description"],
-        failure_input=task["failure_input"],
+        task_description=task_description,
+        failure_input=failure_input,
     )
 
     # Which agents ran is already unambiguous in the log -- the stubs write
     # `stub_scripted` and the real agents write `llm_request` -- so this is for
     # the person at the terminal, and `run_started` keeps the payload it had.
+    # `failure` is here for the same reason: where the evidence came from is the
+    # one thing about this run that nothing else on screen answers.
     print(
-        f"{RULE}\ntask     {task_file}\ntask id  {task_id}\n"
+        f"{RULE}\nrepo     {repo_dir}\ntask id  {task_id}\n"
+        f"failure  {failure_source}\n"
         f"agents   {'stubbed (no API calls)' if args.stub else 'real'}\n{RULE}"
     )
 
     final = run_task(
         state,
-        fixture_path=fixture_path,
+        fixture_path=repo_dir,
         planner=planner,
         implementer=implementer,
         reviewer=reviewer,
