@@ -1182,7 +1182,8 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 6 — **in progress. 6.0.5 and 6.1 are built, and the loop was not touched.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
+**Phase:** 6 — **in progress. 6.0.5 and 6.1 are built and verified; 6.2's first real-repo run has started and has already produced four findings and one crash.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
+**The governing rule is now live, not hypothetical:** 6.2 has said what broke, so 6.3 may finally build — but only the one thing 6.2 evidenced. See "The next two steps" below, which are fixed and should not be re-chosen from 6.3's table.
 **Last completed:** Tasks 6.0.5 (auto-discover the failure) and 6.1 (generalise the CLI), built together in one session because both change nothing but `cli.py`'s argument handling and splitting them would have been two commits touching the same forty lines. Suite is **464 tests, all passing, 219s** — up from 432; the 32 new ones are all in `test_cli.py` (66 → 98).
 
 **The acceptance run is spent and it passed. Three calls, `succeeded` on attempt 1** — `transcripts/fixture_repo_1_20260909T133925Z.jsonl`, run as `python cli.py --repo tasks/fixture_repo_1` with no `--failure` flag and no `task.json` consulted at any point.
@@ -1214,17 +1215,188 @@ Everything else matches character for character, **including `rootdir: D:\Agenti
 
 (An earlier run in the same session failed one test in `TestGeneratorsAgainstTheRealTester`, then a re-run failed a *different* one in the same class, with the class taking 662s for five tests. Both pass in isolation in ~6s and the clean full run is green. That is the contention signature the note at the end of this section describes — recorded here because it recurred and cost time to rule out, not because anything changed.)
 
-**The next action: Task 6.2.** One real run against one small, real, public Python repo — 10–40 files, a utility library is ideal — with a genuinely failing test, introduced by hand the same way the three fixtures' bugs were. Capture nothing: `--repo` finds it now.
+### 6.2 — the first real-repo run. Four findings, one crash, one call spent.
 
-```bash
-python cli.py --repo <path/to/some/real/repo>
-```
+**Target:** `un33k/python-slugify` at a shallow clone — 36 tracked files, flat
+layout, 125 tests green at baseline, one dependency (`text-unidecode`). A
+one-character bug was injected into `slugify/slugify.py`'s `_modern_truncate`
+(`if next_length <= max_length:` → `<`), reddening 3 tests across 2 classes. The
+same *kind* of bug as `fixture_repo_1`'s, chosen mechanically from four
+candidates by applying each to a scratch copy and running the suite — the rule
+every fixture was held to.
 
-**Run it and do not help it along.** It is a probe in the same spirit as `probe_reviewer.py` and `probe_implementer.py` — a measurement, not a demo you are hoping goes well, and a failure is exactly as valuable as a success. Record: whether the Planner's prompt blew past a reasonable size and at what file count; whether it succeeded, retried, or escalated, and why specifically; and if it failed, whether the failure is the *kind* predicted (context size) or something else entirely — a fixture-specific assumption in the prompts, a repo layout the `pytest.ini` trick does not handle, an import structure whole-file replacement breaks on.
+**Why this repo and not a better-known one.** `itsdangerous`, `tomli` and
+`python-dotenv` were all measured and rejected: each uses `src/` layout, which
+needs an install to import, and an install — editable or not — resolves imports
+to the **original clone**, not to `runs/<task_id>/`. The Implementer's edits
+would be invisible to the Tester and the suite could never go green regardless
+of how correct the fix was. Flat layout is the only shape the current design can
+actually measure. Recorded so the choice reads as a scoping decision with a
+reason rather than as picking a repo that happens to work.
 
-**Do it 2–3 times against different small repos before deciding anything.** One data point risks over-fitting the next move to a fluke. Then, and only then, pick exactly one task from 6.3's table based on what 6.2 actually produced. **Do not pre-select from that table.**
+**Everything below was confirmed before or during the run, not reconstructed
+after it.** Full working record in the session's findings file; the four
+findings are summarised here because they are what 6.3 must choose from.
 
-Two things already known to be waiting: `prepare_run_dir` will `copytree` a real repo's `.git` and `.venv` (see "task_id"), and `list_repo_files` feeds every file into the Planner's prompt. Both are 6.2 findings to be *observed*, not fixed in advance.
+#### One gap with four faces
+
+The root cause under F1–F3 is single and worth stating once: **the harness treats
+the target as a directory of bytes, with no model of it as a project.** It has no
+notion of what is source, what is version-control metadata, or what environment
+the suite needs. Three fixtures could never show this, because a fixture is a
+directory built to be exactly that and nothing more.
+
+**F1 — `.git` is copied, and it is fatal, not merely wasteful.** `IGNORED` skips
+`__pycache__` and `.pytest_cache` and nothing else, so 29 of the 65 files
+`list_repo_files` discovered were `.git/` internals. The prompt cost is minor
+(they are non-`.py`, so they are listed by path only). **The fatal cost is the
+reset.** Git marks pack files read-only on Windows; `reset_run_dir` calls
+`shutil.rmtree(target, ignore_errors=True)`, which fails on them and **swallows
+the failure silently**; the run directory survives as a `.git`-only skeleton; and
+`prepare_run_dir`'s `copytree` then dies with `FileExistsError`. Measured: 3
+read-only files under `.git/objects/pack/`, and `rmtree` re-run by hand reports
+`still exists: True`.
+
+**The deeper problem is `ignore_errors=True`, not `.git`.** It means invariant 4 —
+"every attempt starts from a fresh copy" — **can fail without saying so.** This
+run crashed loudly only because `prepare_run_dir` happens to carry an existence
+guard that this file documents as being for a stale directory or an id clash; it
+was never designed to catch a reset that did not reset. A partial reset that
+cleared that guard would silently contaminate the ground every diff is rendered
+against. The crash landed on attempt 1 rather than attempt 2 because of the
+deliberately redundant first-attempt reset — that redundancy converted latent
+corruption into an immediate crash, which is that trade paying off exactly as
+argued under "Order of operations".
+
+**F2 — the inline cap is per-file, and the real cost is many small files.**
+`MAX_INLINED_CHARS = 40_000` drops an oversized file to a path-only listing, but
+there is no total-prompt budget above it, so N small files all go in regardless
+of N. Measured through the real `render_repo`: `fixture_repo_1` is 4,397
+characters (~1,099 tokens); python-slugify is 40,530 (~10,132) — **9.2x at 36
+tracked files**, none of which trips the per-file cap. `tomli` shows the other
+axis at 1,038 files and ~26,371 tokens, because it vendors the `toml-test` data
+corpus. **The Planner was still correct at 9.2x**, so this is a measured cost,
+not yet a measured failure.
+
+**F3 — no per-target dependency isolation.** `Tester._invoke_pytest` runs
+`[sys.executable, "-m", "pytest"]`, which is the *harness's* interpreter — a
+decision this file defends explicitly and which is right for a fixture. On a real
+repo it means the target's dependencies must be installed into the harness's own
+virtualenv. There is no per-target environment and no step that reads the
+target's dependency declaration. Three consequences: the harness cannot run a
+repo whose dependencies it lacks; every target permanently mutates the harness's
+environment, with no way to express that repo A needs `attrs<22` while repo B
+needs `attrs>=23`; and a target can shadow something `harness/` imports, because
+they now share an interpreter. The `src/` layout problem above is the second half
+of this same gap.
+
+**F4 — the Tester's summary parser is defeated by the target's own pytest
+config, and this is the sharpest finding.** python-slugify's `pyproject.toml`
+carries `addopts = "--color=yes"`, which forces ANSI colour even when stdout is
+not a tty — and the Tester always captures via `subprocess`. Measured: **526
+escape sequences** in 6,196 characters. `_parse_summary` anchors both its header
+check (`line.startswith("=")`) and its row regex (`^(?:FAILED|ERROR)\s+`) at
+column zero; the real lines begin `\x1b[36m\x1b[1m====` and `\x1b[31mFAILED`.
+Same parser, both repos:
+
+| repo | exit | `failed_tests` | `summary_parsed` |
+| --- | --- | --- | --- |
+| `fixture_repo_1` | 1 | `['tests/test_orders.py::test_an_order...']` | **True** |
+| python-slugify | 1 | `[]` | **False** |
+
+**The consequence is a misrouted status, not a lost list.** `summary_parsed is
+False` is the `escalated_broken_suite` branch — "pytest could not collect" — and
+that is simply untrue here: 125 tests collected and 3 failed. So on any repo that
+forces colour, **a failing attempt escalates instead of retrying, and the retry
+path is structurally unreachable.** The `--repo` banner also under-reports, which
+is how this surfaced: it printed `auto-discovered (0 failing test(s))` while
+handing the Planner a `failure_input` describing three.
+
+This is the category 6.2 was told to expect — "a fixture-specific assumption that
+doesn't hold for real code" — but one layer deeper than predicted. It is not in a
+prompt. It is in the Tester's text parser, the one component with no model in it,
+and **it falsifies this file's own defence of text parsing**: "the summary
+section is stable, human-readable, and already on stdout". It is stable; it is
+not uncoloured. No fixture has `addopts`, so nothing could have caught this.
+
+#### The Planner was right, and the prediction written before the call was wrong
+
+Recorded as a miss, because the prediction was written down to be checkable.
+`tests/test_release.py` rebinds the public API at module scope —
+`slugify = partial(public_slugify, algorithm="modern")` — and `_is_test_file`
+hides test bodies, so the Planner never sees that line. Read against the source
+it *can* see, the traceback's `slugify(...)` calls default to `algorithm='legacy'`
+and point at `_legacy.smart_truncate`, which is baseline-correct. The prediction
+was that it would follow that and produce an unrecoverable plan.
+
+It did not. It targeted `slugify/slugify.py`, named `_modern_truncate`, specified
+the exact one-character fix — and wrote the constraint *"Do not change the legacy
+slugify implementation in `slugify/_legacy.py`"*, which shows it **considered the
+legacy dispatch and ruled it out** rather than never noticing it. It did this on
+a 9.2x prompt, from a `failure_input` carrying 526 escape sequences, with
+`failed_tests` empty.
+
+**A fourth Planner rescue, and the strongest of the four** — the first three were
+fixtures whose author knew where the trap was; this is someone else's dispatch
+logic. Consistent with the fixture-2 and fixture-3 findings rather than a new
+claim, but on code the project did not write.
+
+**What this run did not measure.** It died at step C of attempt 1, so the
+Implementer, the Reviewer, the gate, the Tester's verdict and the retry path are
+all still unmeasured on a real repo. **One API call spent.** The Planner-context
+question 6.2 asked first is answered — 9.2x, still correct — and everything
+downstream is owed.
+
+#### One observation from an aborted re-run, kept separate from the findings
+
+A second attempt at the run died on an upstream **503 UNAVAILABLE** from Gemini
+("currently experiencing high demand") during the Planner call. The SDK retried,
+exhausted, and `_transport_error` classified it `retryable=True`. **The harness
+did what it was designed to do; this is not a finding and is not in the F1-F4
+list.**
+
+What it did surface, for the first time by observation rather than by argument:
+the log ends at `llm_request` with **no `run_finished` and no report** — the
+human gets a traceback. That does not contradict "every halt goes through
+`_halt`", which is a claim about the paths *the loop can take*; an exception
+inside an agent bypasses `_halt` by construction, exactly as documented for
+`AgentContractError` and `LLMResponseError`. What is new is only that it has now
+been seen. It sharpens the standing open question about a seventh `Status`
+without answering it — and a run killed by someone else's capacity problem is
+arguably the clearest case for leaving it as a stack trace, since no `Status`
+would describe it better than the traceback does. **Deliberately not added to the
+plan below.**
+
+### The next two steps, fixed in advance and not to be re-chosen
+
+6.3's table says to pick exactly one fix based on what 6.2 evidenced, and to
+build one at a time. What 6.2 evidenced is F1, by crashing on it. So:
+
+**Next: finish 6.2's measurement first.** Re-run against the same clone with
+`.git` removed. Stripping `.git` is environment setup, the same category as
+installing the target's dependency — no harness code changes, so 6.2's
+"do not intervene" rule holds. F1's fatality is already fully recorded, so
+nothing is lost by stepping around it. This is what buys the Implementer,
+Reviewer, gate, Tester and retry measurements that the crash cost.
+
+**Then 6.3 — exclude `.git` from `IGNORED` in `workspace.py`.** This is 6.3's
+"something about real repo structure broke that had nothing to do with size" row.
+It is deliberately *not* the retrieval/file-selection step, and not localized
+edits: F2 measured a 9.2x prompt that the Planner handled correctly, which is a
+cost rather than a failure, and nothing has yet evidenced an Implementer-side
+problem at all. **Do not build for F2 or F4 yet on this evidence.** Note when
+building it that `rmtree(ignore_errors=True)` is the deeper half of F1 and may
+deserve the same commit; decide that then, with the code open.
+
+**Then 6.4 — re-run against a `.git`-intact clone**, specifically to confirm the
+fix resolves the `FileExistsError` rather than assuming it does. That is 6.4's
+whole job: "don't assume the fix worked because it seems like it should."
+
+**F4 is the strongest candidate for the step after that**, and is recorded here
+so it is not lost: it makes the retry path unreachable on any repo that forces
+colour, which is a larger claim than anything F1 costs. It is not being built now
+only because one fix at a time is the phase discipline, and because F1 is what
+actually stopped a run.
 
 ### Phase 5, complete as recorded
 
