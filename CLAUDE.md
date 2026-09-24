@@ -1182,7 +1182,7 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 6 — **in progress. 6.0.5 and 6.1 are built and verified; 6.2's first real-repo run has started and has already produced four findings and one crash.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
+**Phase:** 6 — **in progress. 6.0.5 and 6.1 are built and verified; 6.2's python-slugify run is complete and went green end to end, having produced four findings and one crash along the way.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
 **The governing rule is now live, not hypothetical:** 6.2 has said what broke, so 6.3 may finally build — but only the one thing 6.2 evidenced. See "The next two steps" below, which are fixed and should not be re-chosen from 6.3's table.
 **Last completed:** Tasks 6.0.5 (auto-discover the failure) and 6.1 (generalise the CLI), built together in one session because both change nothing but `cli.py`'s argument handling and splitting them would have been two commits touching the same forty lines. Suite is **464 tests, all passing, 219s** — up from 432; the 32 new ones are all in `test_cli.py` (66 → 98).
 
@@ -1367,19 +1367,83 @@ arguably the clearest case for leaving it as a stack trace, since no `Status`
 would describe it better than the traceback does. **Deliberately not added to the
 plan below.**
 
+#### The confirming run: green end to end on a real, undesigned repo
+
+`transcripts/python-slugify_20260924T202404Z.jsonl`. **`succeeded`, attempt 1 of
+5, three API calls, `reason: the suite is green.`** Run against the same clone
+with `.git` stripped, so it is a clean measurement of everything the crash cost —
+Implementer, Reviewer, gate, apply and Tester, none of which had ever run against
+a repo this project did not write.
+
+**This is the first full end-to-end success on a real repo**, and the headline
+for 6.2's python-slugify arm. 36 files, a ~9,900-token Planner prompt, someone
+else's code, someone else's test conventions, a bug injected into live branching
+logic — and three calls, first attempt, green.
+
+**The Planner reproduced its answer on an independent call.** This is a different
+run from the `.git` crash, with its own fresh Planner request; nothing was
+carried over. It arrived at the same `target_files` (`slugify/slugify.py`) and
+the same function (`_modern_truncate`), and specified the same one-character
+change. The rendered diff is exactly the revert:
+
+```
+-            if next_length < max_length:
++            if next_length <= max_length:
+```
+
+**Twice in a row, on separate calls, it avoided the `_legacy.py` dispatch trap** —
+the one predicted in writing beforehand, where the traceback's `slugify(...)`
+calls read as the legacy default because `_is_test_file` hides the
+`partial(public_slugify, algorithm="modern")` rebinding.
+
+**One precision worth keeping, because the two runs are not equally strong
+evidence.** The first run's plan carried the constraint *"Do not change the
+legacy slugify implementation in `slugify/_legacy.py`"* — explicit proof it
+considered the legacy dispatch and ruled it out. This run's constraints are
+generic (*"Only `slugify/slugify.py` is edited"*, *"No test files or other source
+files are modified"*) and never name `_legacy.py`. So: **the correct outcome
+reproduced twice; the visible deliberation appears only in run one.** Two data
+points for "it lands on the right file", one for "it demonstrably reasoned about
+the wrong one". Do not cite the second as if it were the first.
+
+**F4 stayed invisible on this path, exactly as predicted.** The pre-run note said
+a correct fix would show F4 only in the banner's `auto-discovered (0 failing
+test(s))`, and so it proved: the final Tester call returned `exit=0`, and pytest
+prints no summary section on a pass, so the Tester's exit-code-0 branch sets
+`summary_parsed=True` without `_parse_summary` ever running. **F4 remains proven
+by direct measurement of the parser, not by a run** — and the retry path is still
+unexercised against a real model, because this went green on attempt 1. That is
+now the fourth fixture-or-repo in a row to be fixed first try.
+
+#### What 6.2's python-slugify arm settles, and what it does not
+
+**Settled:** the harness works end to end on a real, undesigned repository. The
+Planner-context question the roadmap asked first is answered — a 9.2x prompt did
+not degrade it. The plan/implement split held on code nobody here wrote.
+
+**Not settled, and not touched by this run:** F1 (still the next real step, see
+below), F2 as anything beyond a measured cost, F4's claim that the retry path is
+unreachable on colour-forcing repos, and the retry path itself on a real model.
+One green run is evidence about one green run — the same reading this file gave
+`fixture_repo_1`'s.
+
 ### The next two steps, fixed in advance and not to be re-chosen
 
 6.3's table says to pick exactly one fix based on what 6.2 evidenced, and to
 build one at a time. What 6.2 evidenced is F1, by crashing on it. So:
 
-**Next: finish 6.2's measurement first.** Re-run against the same clone with
-`.git` removed. Stripping `.git` is environment setup, the same category as
-installing the target's dependency — no harness code changes, so 6.2's
-"do not intervene" rule holds. F1's fatality is already fully recorded, so
-nothing is lost by stepping around it. This is what buys the Implementer,
-Reviewer, gate, Tester and retry measurements that the crash cost.
+**Done — 6.2's python-slugify measurement is complete.** The re-run against the
+`.git`-stripped clone went green end to end; see "The confirming run" above.
+Stripping `.git` was environment setup, the same category as installing the
+target's dependency, with no harness code changed.
 
-**Then 6.3 — exclude `.git` from `IGNORED` in `workspace.py`.** This is 6.3's
+**Next, and unchanged by that success: 6.3 — exclude `.git` from `IGNORED` in
+`workspace.py`.** Stating this plainly because the green run makes it easy to
+mislay: **the confirming run neither depended on F1 nor resolved it.** It ran
+against a clone with `.git` already removed by hand, which is precisely why it
+got past the reset. Point the harness at any ordinary cloned repository today and
+it still dies with `FileExistsError` at the first `reset_run_dir`. F1 is the one
+thing 6.2 evidenced by stopping a run, and it remains the next real step. This is 6.3's
 "something about real repo structure broke that had nothing to do with size" row.
 It is deliberately *not* the retrieval/file-selection step, and not localized
 edits: F2 measured a 9.2x prompt that the Planner handled correctly, which is a
