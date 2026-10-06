@@ -65,7 +65,7 @@ Build order. Phases 1–2 make **zero API calls**.
 | 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | done — 3A (client, Planner, Implementer, `cli.py`), 3A.1 (Anthropic → Gemini), 3B (Reviewer, `--stub`) |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | done — evidence packaging and retry-with-evidence were already built in 2.3/3A; 4A adds the escalation output, 4B `fixture_repo_2`, 4C the run against it (green on attempt 1, trap did not spring) |
 | 5 | Fixture repo 3, Reviewer-rejection scenario, saved transcripts, README update — `fixture_repo_2` moved into Phase 4, which needed it for the recovery run | in progress — 5A (fixture 3, `probe_reviewer.py`), 5.1 (probe pass **8/8**, end-to-end run), 5B (`probe_implementer.py`, **5/5**) |
-| 6 | Export, measure, then fix what actually breaks — generalise the CLI, then run against real repos and let the failures pick the next task | in progress — 6.0.5 + 6.1 (auto-discovery, `--repo`), 6.2 (first real repo: four findings, green end to end), 6.3 (F1 fixed) |
+| 6 | Export, measure, then fix what actually breaks — generalise the CLI, then run against real repos and let the failures pick the next task | in progress — 6.0.5 + 6.1 (auto-discovery, `--repo`), 6.2 (first real repo: four findings, green end to end), 6.3 (F1 fixed), 6.4 (F1 confirmed on a real `.git`) |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
 
@@ -1184,7 +1184,7 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 6 — **in progress. 6.0.5, 6.1, 6.2 and 6.3 are done: the CLI takes any repo, 6.2's python-slugify run went green end to end after producing four findings and one crash, and 6.3 has fixed the one finding that stopped a run.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
+**Phase:** 6 — **in progress. 6.0.5, 6.1, 6.2, 6.3 and 6.4 are done: the CLI takes any repo, 6.2's python-slugify run went green end to end after producing four findings and one crash, 6.3 fixed the one finding that stopped a run, and 6.4 confirmed that fix against a real `.git` object store.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
 **The governing rule is now live, not hypothetical:** 6.2 has said what broke, so 6.3 may finally build — but only the one thing 6.2 evidenced. See "The next two steps" below, which are fixed and should not be re-chosen from 6.3's table.
 **Last completed:** Tasks 6.0.5 (auto-discover the failure) and 6.1 (generalise the CLI), built together in one session because both change nothing but `cli.py`'s argument handling and splitting them would have been two commits touching the same forty lines. Suite is **464 tests, all passing, 219s** — up from 432; the 32 new ones are all in `test_cli.py` (66 → 98).
 
@@ -1593,6 +1593,99 @@ would destroy the test.
 row still reads `gemini-3.6-flash`. This change was scoped to one line of
 `harness/llm.py` plus this file.
 
+### 6.4 — F1 confirmed resolved against a real object store
+
+`transcripts/python-slugify_20261006T103620Z.jsonl`. **`succeeded`, attempt 1 of
+5, three API calls, `reason: the suite is green.`** Target was a fresh
+`git clone --depth 1` at `experiments/git_intact/python-slugify` with **`.git`
+left in place on purpose**, carrying 3 read-only pack files — the exact condition
+that killed the 6.2 run. Same one-character bug in `_modern_truncate`.
+
+Every claim below was read out of that log rather than inferred from the run's
+console output.
+
+#### F1 is resolved, and the proof is a single event
+
+**`baseline_reset` appears at attempt 1 and the run continued past it.** That is
+the call — `reset_run_dir` → `rmtree` → `prepare_run_dir` → `copytree` — which
+raised `FileExistsError: [WinError 183]` in
+`transcripts/python-slugify_20260923T113847Z.jsonl`. In 6.2 the log ends there.
+Here it is followed by the Implementer, the Reviewer, the gate, apply, and a
+green Tester.
+
+Three further checks, all against disk rather than argument:
+
+- The run directory `runs/python-slugify_20261006T103620Z/` exists and **has no
+  `.git`** — the copy half of the fix, confirmed on a real object store rather
+  than the synthetic one the unit test builds.
+- The **source clone still has its `.git`**, with all 3 pack files still
+  read-only. Excluding it from the copy did not mean touching the original.
+- `list_repo_files` saw **36 files, 0 under `.git/`** (6.2's crash run saw 65
+  files, 29 of them `.git/` internals).
+
+**This is what the unit test could not buy.** `test_a_read_only_pack_no_longer_breaks_the_reset`
+pins the mechanism against a `.git` the test writes itself; this is a real
+object store, a real `--depth 1` clone, and the whole loop running through it.
+6.4's stated job was "don't assume the fix worked because it seems like it
+should", and the answer is that it did.
+
+#### The Planner result — a first data point for 3.5, not a third for 3.6
+
+All three calls report `model=gemini-3.5-flash`, `stop_reason=STOP`,
+`parse_attempts=1`. **This is the first run on 3.5. The two python-slugify
+Planner results recorded above were produced by `gemini-3.6-flash`, and these
+are not like-for-like — do not cite this as a third data point for the same
+thing.** See "The model changed" above for why that line matters.
+
+What 3.5 produced:
+
+```
+target_files: ['slugify/slugify.py']
+summary     : Fix word_boundary truncation in the modern slugify algorithm to
+              allow word length up to max_length instead of strictly less than
+              max_length.
+constraints : - Only slugify/slugify.py should be edited.
+              - Do not edit slugify/_legacy.py under any circumstances.
+              - Keep the signature and docstring of _modern_truncate unchanged.
+```
+
+Right file, right function, and the rendered diff is exactly the revert of the
+injected bug.
+
+**The second constraint is worth noting precisely, because it is the stronger of
+the two forms this has taken.** *"Do not edit `slugify/_legacy.py` under any
+circumstances"* is explicit evidence that the legacy dispatch was considered and
+ruled out — the trap predicted in writing before 6.2, where the traceback's
+`slugify(...)` calls read as the legacy default because `_is_test_file` hides the
+`partial(public_slugify, algorithm="modern")` rebinding. The first 3.6 run showed
+that deliberation; the second did not (its constraints were generic). So the
+tally across three independent calls on two models is: **three for "lands on the
+right file", two for "demonstrably reasoned about the wrong one" — and the two
+are one call each on a different model.** Do not compress that into a single
+number.
+
+#### What this run does not establish
+
+Stated plainly, because a green run is the easiest place to over-claim:
+
+- **n=1 repo.** One target, python-slugify, which is also the only real repo this
+  harness has ever been pointed at. Nothing here says the design generalises.
+- **Attempt 1, no retry.** The fifth consecutive fixture-or-repo fixed first try.
+  The retry path — a rejection or a Tester failure reaching a real Implementer
+  through the loop — is **still never exercised end to end**, as it has been
+  since 3A.
+- **F2 was incurred, not resolved.** The Planner prompt was ~9,981 tokens and was
+  handled correctly. Still a measured cost, still not a measured failure.
+- **F3 was not exercised.** `text-unidecode` was already in the harness venv from
+  6.2, so the missing-dependency gap was *pre-satisfied* rather than tested. The
+  architectural gap is untouched.
+- **F4 reproduced and still stayed invisible in the status.** Discovery again
+  returned `failed_tests=[]` with `exit_code=1` over 6,129 characters of
+  colour-escaped output — the parser defeat, on 3.5 as on 3.6. The final Tester
+  returned `exit=0`, so `summary_parsed` was set `True` by the exit-code-0 branch
+  without `_parse_summary` running. **F4's actual consequence has still never been
+  observed in a run**, only in direct measurement of the parser.
+
 ### The next two steps, fixed in advance and not to be re-chosen
 
 6.3's table says to pick exactly one fix based on what 6.2 evidenced, and to
@@ -1612,21 +1705,37 @@ problem at all. **Do not build for F2 or F4 on the current evidence.** The
 `rmtree(ignore_errors=True)` question was decided with the code open and answered
 **no**, with a named revisit trigger — see "The `rmtree` decision" above.
 
-**Next: 6.4 — re-run against a `.git`-intact clone**, specifically to confirm the
-fix resolves the `FileExistsError` rather than assuming it does. That is 6.4's
-whole job: "don't assume the fix worked because it seems like it should." The
-unit test pins the mechanism against a synthetic `.git`; 6.4 is what proves it
-against a real clone with a real object store, end to end through the loop.
+**Done — 6.4 confirmed F1 against a real object store.** `succeeded`, attempt 1,
+three calls, `baseline_reset` survived where 6.2 died. See "6.4" above.
 
-The clone is still in place, minus its `.git`, with the one-character bug in
-`slugify/slugify.py`. A fresh `git clone --depth 1` of `un33k/python-slugify`
-plus the same injected bug reproduces the original conditions exactly.
+**Next: 6.2 again, against 2-3 further small real repos — and this time with bugs
+chosen to make a retry happen.** The roadmap always said to do 6.2 two or three
+times before concluding anything, and one green run is not evidence the design
+generalises. Two things shape the choice of bug:
 
-**F4 is the strongest candidate for the step after that**, and is recorded here
-so it is not lost: it makes the retry path unreachable on any repo that forces
-colour, which is a larger claim than anything F1 costs. It is not being built now
-only because one fix at a time is the phase discipline, and because F1 is what
-actually stopped a run.
+1. **The bug must need more than one edit site, or admit a plausible-but-incomplete
+   first fix.** Every bug used so far has been a one-character boundary flip that a
+   correct plan fully determines, which is precisely why five runs in a row have
+   gone green on attempt 1. A fix the plan under-determines is the only thing that
+   produces a natural retry.
+2. **The recoverability constraint still binds.** The difficulty has to sit between
+   a *correct* plan and a first implementation of it. A bug that misleads the
+   Planner produces an unrecoverable run, not a retry — v1 never replans. See
+   "Fixture design: the recoverability constraint".
+
+**F4 is coupled to this, and the coupling is the reason it may have to come
+first.** On any repo whose pytest config forces colour, a failing attempt is
+misread as `summary_parsed=False` and **escalates instead of retrying** — so the
+retry this next step exists to produce would be destroyed by the very mechanism
+it needs. python-slugify forces colour. So either the next repos must be checked
+for `addopts` / `--color` before a call is spent, or **F4 gets fixed first**.
+Check the candidates' pytest config during staging; if they force colour, fix F4
+and then run. That is a decision to make with the candidates in front of you,
+not now.
+
+**F2 and F3 stay unbuilt.** F2 is a measured cost the Planner has handled at 9.2x
+twice; F3 is real but has never blocked a run that was set up correctly. Neither
+has evidenced a failure, and the phase rule has not changed.
 
 ### Phase 5, complete as recorded
 
