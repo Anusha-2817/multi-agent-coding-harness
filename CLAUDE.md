@@ -65,7 +65,7 @@ Build order. Phases 1–2 make **zero API calls**.
 | 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | done — 3A (client, Planner, Implementer, `cli.py`), 3A.1 (Anthropic → Gemini), 3B (Reviewer, `--stub`) |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | done — evidence packaging and retry-with-evidence were already built in 2.3/3A; 4A adds the escalation output, 4B `fixture_repo_2`, 4C the run against it (green on attempt 1, trap did not spring) |
 | 5 | Fixture repo 3, Reviewer-rejection scenario, saved transcripts, README update — `fixture_repo_2` moved into Phase 4, which needed it for the recovery run | in progress — 5A (fixture 3, `probe_reviewer.py`), 5.1 (probe pass **8/8**, end-to-end run), 5B (`probe_implementer.py`, **5/5**) |
-| 6 | Export, measure, then fix what actually breaks — generalise the CLI, then run against real repos and let the failures pick the next task | in progress — 6.0.5 + 6.1 done (auto-discovery, `--repo`) |
+| 6 | Export, measure, then fix what actually breaks — generalise the CLI, then run against real repos and let the failures pick the next task | in progress — 6.0.5 + 6.1 (auto-discovery, `--repo`), 6.2 (first real repo: four findings, green end to end), 6.3 (F1 fixed) |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
 
@@ -114,7 +114,9 @@ The reset is drawn at the **top** of each attempt rather than on the return edge
 
 Fixtures are **plain directories with no git**. `tasks/fixture_repo_1/` is ordinary files plus a hand-authored `task.json`.
 
-At run start the harness copies the fixture to `runs/<task_id>/` with `shutil.copytree`, ignoring `__pycache__` and `.pytest_cache`. All work — apply, test, reset — happens in the copy. The fixture directory itself is never written to.
+At run start the harness copies the fixture to `runs/<task_id>/` with `shutil.copytree`, ignoring `__pycache__`, `.pytest_cache` and **`.git`**. All work — apply, test, reset — happens in the copy. The fixture directory itself is never written to.
+
+`.git` joined that list in Task 6.3, on the evidence of 6.2's F1 — it is not a cache, and the shared constant is now `_EXCLUDED_DIR_NAMES` rather than `_CACHE_DIR_NAMES` so the name does not lie about what it holds. **A repository's history is not part of the code under test**, and nothing in the harness reads it: the Planner is shown source, the Implementer replaces whole files, the Tester runs pytest, and reset is a re-copy rather than a `git checkout` — a decision made in Phase 1 and never revisited.
 
 **One qualification, added in 6.0.5 and enforced rather than merely stated.** `cli.discover_failure` runs a pytest subprocess *inside* the target repo, before the copy, so pytest writes `__pycache__` and `.pytest_cache` there during that run. It clears both on the way out, in a `finally`, and the repo is left as it was found. The claim above is therefore intact — and it is intact because `test_tester.py` already enforces it: `test_a_run_leaves_no_caches_in_the_fixture` and `test_the_fixture_directory_is_untouched_by_a_run` both went red the first time discovery ran without the cleanup, which is how the omission was caught rather than shipped. The residue worth naming: a *pre-existing* `.pytest_cache` in the target repo is deleted, so pytest's own `--lf` state there is lost. That is regenerable derived data, and the pre-clear is load-bearing — a stale cache is what produces a phantom result.
 
@@ -1182,7 +1184,7 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 6 — **in progress. 6.0.5 and 6.1 are built and verified; 6.2's python-slugify run is complete and went green end to end, having produced four findings and one crash along the way.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
+**Phase:** 6 — **in progress. 6.0.5, 6.1, 6.2 and 6.3 are done: the CLI takes any repo, 6.2's python-slugify run went green end to end after producing four findings and one crash, and 6.3 has fixed the one finding that stopped a run.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
 **The governing rule is now live, not hypothetical:** 6.2 has said what broke, so 6.3 may finally build — but only the one thing 6.2 evidenced. See "The next two steps" below, which are fixed and should not be re-chosen from 6.3's table.
 **Last completed:** Tasks 6.0.5 (auto-discover the failure) and 6.1 (generalise the CLI), built together in one session because both change nothing but `cli.py`'s argument handling and splitting them would have been two commits touching the same forty lines. Suite is **464 tests, all passing, 219s** — up from 432; the 32 new ones are all in `test_cli.py` (66 → 98).
 
@@ -1257,16 +1259,30 @@ the failure silently**; the run directory survives as a `.git`-only skeleton; an
 read-only files under `.git/objects/pack/`, and `rmtree` re-run by hand reports
 `still exists: True`.
 
-**The deeper problem is `ignore_errors=True`, not `.git`.** It means invariant 4 —
-"every attempt starts from a fresh copy" — **can fail without saying so.** This
-run crashed loudly only because `prepare_run_dir` happens to carry an existence
-guard that this file documents as being for a stale directory or an id clash; it
-was never designed to catch a reset that did not reset. A partial reset that
-cleared that guard would silently contaminate the ground every diff is rendered
-against. The crash landed on attempt 1 rather than attempt 2 because of the
-deliberately redundant first-attempt reset — that redundancy converted latent
-corruption into an immediate crash, which is that trade paying off exactly as
-argued under "Order of operations".
+**A claim made here when F1 was first written has since been checked against
+the code and found wrong. It is corrected rather than quietly edited, because
+the correction is the more useful record.** The original text said
+`ignore_errors=True` means invariant 4 "can fail without saying so", and that a
+partial reset could silently contaminate the ground every diff is rendered
+against. **It cannot.** A non-empty directory cannot be removed, so any file
+surviving `rmtree` leaves `target` in place, and `prepare_run_dir`'s `copytree`
+then raises `FileExistsError` on `makedirs(dst, exist_ok=False)`. Verified in
+6.3 by building a run directory with a read-only file inside it, calling
+`shutil.rmtree(..., ignore_errors=True)`, and confirming the copy raises rather
+than proceeding. **Every partial reset is loud.** Invariant 4 is structurally
+protected — by `prepare_run_dir`'s existence guard, not by `rmtree`.
+
+What is genuinely wrong with `ignore_errors=True` is narrower and worth keeping:
+**the error it produces names the wrong thing.** `FileExistsError` on the run
+directory reads as "a stale directory from a crashed run or a genuine id clash",
+which is exactly what this file documents that guard as being for. It does not
+say "the reset failed to delete three read-only files", and the distance between
+those two messages is most of the time 6.2's crash cost to diagnose.
+
+The crash landed on attempt 1 rather than attempt 2 because of the deliberately
+redundant first-attempt reset — that redundancy converted a latent problem into
+an immediate crash, which is that trade paying off exactly as argued under
+"Order of operations".
 
 **F2 — the inline cap is per-file, and the real cost is many small files.**
 `MAX_INLINED_CHARS = 40_000` drops an oversized file to a path-only listing, but
@@ -1427,6 +1443,107 @@ unreachable on colour-forcing repos, and the retry path itself on a real model.
 One green run is evidence about one green run — the same reading this file gave
 `fixture_repo_1`'s.
 
+### 6.3 — F1 fixed. `.git` is excluded, and `rmtree` was deliberately left alone.
+
+**One behavioural change**, in `harness/workspace.py`: `_CACHE_DIR_NAMES` became
+`_EXCLUDED_DIR_NAMES` and gained `.git`. Both users of that constant are in the
+same module — `IGNORED` (what `copytree` skips) and `list_repo_files`'s `skip`
+(what a prompt lists) — so one edit closes both halves of F1. They share the
+constant deliberately: a directory skipped by one and walked by the other would
+put files in a prompt that are not in the run directory the plan targets.
+
+Nothing else moved. Not the loop, not the agents, not the contracts, not
+`reset_run_dir`. Suite is **468 tests, all passing, 199s** — up from 464 by
+exactly the four added below.
+
+#### The `rmtree(ignore_errors=True)` decision: not bundled, and why
+
+The plan said to decide this with the code open rather than defer it again. The
+decision is **no**, and the reasoning changed on inspection, which is the part
+worth recording.
+
+**The argument for bundling it was that invariant 4 could fail silently. That
+argument does not survive contact with the code.** See the correction folded into
+F1 above: a non-empty directory cannot be removed, so any survivor keeps `target`
+in place and `copytree` raises. Verified by building the exact condition —
+read-only file, `rmtree(ignore_errors=True)`, then the copy — and watching it
+raise. Every partial reset is loud, and invariant 4 is protected by
+`prepare_run_dir`'s existence guard rather than by `rmtree`'s error handling.
+
+**With that gone, three reasons to leave it alone and one to revisit later:**
+
+1. **Excluding `.git` removes the only observed source of read-only files.** The
+   pack files were the trigger; they are no longer copied.
+2. **Changing it now would be engineering for an imagined failure** — the exact
+   thing Phase 6's governing rule forbids, and the same discipline as the fixture
+   rulings. There is no longer a known repository shape that reaches it.
+3. **One fix at a time is the phase discipline**, and 6.4 should confirm one
+   thing. Two changes in this commit would make a green 6.4 ambiguous about which
+   one earned it.
+
+**What is real, and is a diagnosability defect rather than a correctness one:**
+the `FileExistsError` names the run directory and reads as a stale directory or
+an id clash, not as a failed reset. **Named revisit trigger:** if a real
+repository produces `FileExistsError` at `reset_run_dir` *after* this fix, that
+is the evidence, and the fix is an `onexc` handler that clears the read-only bit
+and retries — not `ignore_errors=False`, which would merely trade a misleading
+error for a different misleading error one frame earlier.
+
+#### The tests, and the one that matters
+
+`test_tester.py` gained `TestVersionControlIsNotCopied`, four tests. It builds
+its own source tree with a `.git` in it rather than using a fixture, because the
+three fixtures have no `.git` and giving one a fake `.git` to satisfy a test
+would be fixture-shaped evidence for a real-repo problem.
+
+- `.git` is not copied — and `.gitignore` **is**, because that is a file the
+  project tracks rather than version-control internals.
+- `.git` is not listed by `list_repo_files`, so the listing and the copy agree.
+- **`test_a_read_only_pack_no_longer_breaks_the_reset`** — the 6.2 crash, pinned.
+  A read-only pack file, then two consecutive `reset_run_dir` calls; the second
+  is the one that used to fail.
+- The *source* repository keeps its own `.git` after a prepare and a reset.
+
+**Three of the four were confirmed to fail without the fix**, by reverting the
+one-line change and re-running — and the third fails with `FileExistsError:
+[WinError 183]`, the same error as the real run in
+`transcripts/python-slugify_20260923T113847Z.jsonl`. A regression test that
+passes before and after pins nothing; these were checked rather than assumed.
+(The fourth passes either way, correctly: the source was never touched.)
+
+#### What was deliberately not done
+
+**`.venv`, `.tox`, `node_modules` were not added.** 6.1 speculated that a real
+repo would bring `.venv` along; python-slugify did not have one, so nothing has
+evidenced it. Adding directory names on the strength of a guess is how a skip
+list becomes folklore. F1 named `.git` because `.git` stopped a run.
+
+**F2 and F4 were not touched**, per the plan.
+
+#### Where experiment clones live, and why not in Temp
+
+**Standing rule, learned by losing one: a target repo staged for a run lives in
+`D:/Agentic_Project1/experiments/`, never under the system Temp directory.**
+
+6.4's clone was first staged in the session scratchpad under
+`C:/Users/DELL/AppData/Local/Temp/...`. Ten days later Windows Temp cleanup had
+emptied it — the directory skeleton survived, every file inside was gone, and the
+session's working findings file went with it. Nothing about the harness was at
+fault and nothing in it needed changing.
+
+`experiments/` sits beside `mach/` rather than inside it, deliberately: a cloned
+repo carrying its own `.git` inside the harness repo is the nested-repo problem
+that Phase 1's "fixtures are plain directories with no git" decision exists to
+avoid, and `experiments/` is outside any git repository at all, so a staged clone
+cannot be committed by accident.
+
+**What was lost and what was not.** The scratchpad findings file for 6.2 is gone.
+Its substance is not: F1–F4, the pre-run predictions, the Planner results and the
+`rmtree` correction were all folded into this file as they were established, and
+the transcripts were already in `transcripts/`. **The lesson is the convention
+rather than the cleanup: fold findings into CLAUDE.md as they are established,
+not at the end of a session.**
+
 ### The next two steps, fixed in advance and not to be re-chosen
 
 6.3's table says to pick exactly one fix based on what 6.2 evidenced, and to
@@ -1437,24 +1554,24 @@ build one at a time. What 6.2 evidenced is F1, by crashing on it. So:
 Stripping `.git` was environment setup, the same category as installing the
 target's dependency, with no harness code changed.
 
-**Next, and unchanged by that success: 6.3 — exclude `.git` from `IGNORED` in
-`workspace.py`.** Stating this plainly because the green run makes it easy to
-mislay: **the confirming run neither depended on F1 nor resolved it.** It ran
-against a clone with `.git` already removed by hand, which is precisely why it
-got past the reset. Point the harness at any ordinary cloned repository today and
-it still dies with `FileExistsError` at the first `reset_run_dir`. F1 is the one
-thing 6.2 evidenced by stopping a run, and it remains the next real step. This is 6.3's
-"something about real repo structure broke that had nothing to do with size" row.
-It is deliberately *not* the retrieval/file-selection step, and not localized
-edits: F2 measured a 9.2x prompt that the Planner handled correctly, which is a
-cost rather than a failure, and nothing has yet evidenced an Implementer-side
-problem at all. **Do not build for F2 or F4 yet on this evidence.** Note when
-building it that `rmtree(ignore_errors=True)` is the deeper half of F1 and may
-deserve the same commit; decide that then, with the code open.
+**Done — 6.3 is built.** `.git` is excluded from `_EXCLUDED_DIR_NAMES`, which
+is 6.3's "something about real repo structure broke that had nothing to do with
+size" row. It was deliberately *not* the retrieval/file-selection step and not
+localized edits: F2 measured a 9.2x prompt the Planner handled correctly, which
+is a cost rather than a failure, and nothing has evidenced an Implementer-side
+problem at all. **Do not build for F2 or F4 on the current evidence.** The
+`rmtree(ignore_errors=True)` question was decided with the code open and answered
+**no**, with a named revisit trigger — see "The `rmtree` decision" above.
 
-**Then 6.4 — re-run against a `.git`-intact clone**, specifically to confirm the
+**Next: 6.4 — re-run against a `.git`-intact clone**, specifically to confirm the
 fix resolves the `FileExistsError` rather than assuming it does. That is 6.4's
-whole job: "don't assume the fix worked because it seems like it should."
+whole job: "don't assume the fix worked because it seems like it should." The
+unit test pins the mechanism against a synthetic `.git`; 6.4 is what proves it
+against a real clone with a real object store, end to end through the loop.
+
+The clone is still in place, minus its `.git`, with the one-character bug in
+`slugify/slugify.py`. A fresh `git clone --depth 1` of `un33k/python-slugify`
+plus the same injected bug reproduces the original conditions exactly.
 
 **F4 is the strongest candidate for the step after that**, and is recorded here
 so it is not lost: it makes the retry path unreachable on any repo that forces

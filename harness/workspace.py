@@ -22,11 +22,40 @@ from harness.state import FileEdit
 
 RUNS_ROOT = "runs"
 
-# Copied fixtures never carry stale bytecode or a stale pytest cache into a run.
-# The Tester clears these again inside the run directory before invoking pytest,
-# because the previous attempt's run generated its own.
-_CACHE_DIR_NAMES = ("__pycache__", ".pytest_cache")
-IGNORED = shutil.ignore_patterns(*_CACHE_DIR_NAMES)
+# Directory names that are never copied into a run directory and never shown to
+# an agent. One list, two reasons, and they share it because `copytree` and
+# `list_repo_files` have to agree about what a repository contains -- a directory
+# skipped by one and walked by the other would put files in a prompt that are not
+# in the run directory the plan targets.
+#
+# **Caches.** A copied fixture must not carry stale bytecode or a stale pytest
+# cache into a run. The Tester clears these again inside the run directory before
+# invoking pytest, because the previous attempt's run generated its own.
+#
+# **`.git`.** Added in Task 6.3, on the evidence of 6.2's F1 -- the first real
+# repository this harness was ever pointed at, which crashed on it. Three things
+# were wrong with copying it, in ascending order of severity:
+#
+# 1. It is I/O the run gets nothing for. `copytree` duplicated the whole object
+#    store, and `reset_run_dir` re-copied it at the top of every attempt -- up to
+#    five times per run, 437K on a *shallow* clone of a small library.
+# 2. It padded the Planner's file listing with version-control internals. 29 of
+#    the 65 files discovered in `python-slugify` were `.git/` entries: `HEAD`,
+#    `config`, every `hooks/*.sample`. Measured cost was small, because they are
+#    non-`.py` and so listed by path only, but it is noise either way.
+# 3. **It stopped a run dead**, which is what actually forced this fix. Git marks
+#    pack files read-only on Windows. `reset_run_dir`'s `rmtree` cannot delete
+#    them, so the run directory survives the reset as a `.git`-only skeleton, and
+#    `prepare_run_dir`'s `copytree` then dies with `FileExistsError` -- a message
+#    that reads as a stale directory or an id clash, sending the reader to
+#    entirely the wrong place.
+#
+# A repository's history is not part of the code under test. Nothing in the
+# harness reads it: the Planner is shown source, the Implementer replaces whole
+# files, the Tester runs pytest, and reset is a re-copy rather than a `git
+# checkout` -- a decision recorded in CLAUDE.md since Phase 1.
+_EXCLUDED_DIR_NAMES = ("__pycache__", ".pytest_cache", ".git")
+IGNORED = shutil.ignore_patterns(*_EXCLUDED_DIR_NAMES)
 
 
 def normalize_path(path: str) -> str:
@@ -97,11 +126,12 @@ def list_repo_files(repo_path: str | Path) -> list[str]:
     `Path` arithmetic and their own idea of which directories to skip.
 
     Sorted, so a prompt built from this is byte-stable across runs -- the same
-    reason `render_diff` sorts its edits. Cache directories are skipped, matching
-    what `copytree` already ignored; a `.pyc` in a prompt is pure noise.
+    reason `render_diff` sorts its edits. Caches and `.git` are skipped, matching
+    what `copytree` already ignored; a `.pyc` in a prompt is pure noise, and so
+    is `.git/hooks/pre-rebase.sample`.
     """
     root = Path(repo_path)
-    skip = set(_CACHE_DIR_NAMES)
+    skip = set(_EXCLUDED_DIR_NAMES)
     found = [
         normalize_path(str(path.relative_to(root)))
         for path in root.rglob("*")

@@ -23,7 +23,12 @@ from harness.agents.tester import (
 )
 from harness.events import EventLog
 from harness.state import STDOUT_TAIL_LIMIT, Plan, TaskState, TestResult
-from harness.workspace import prepare_run_dir, reset_run_dir, run_dir_for
+from harness.workspace import (
+    list_repo_files,
+    prepare_run_dir,
+    reset_run_dir,
+    run_dir_for,
+)
 
 FIXTURE = Path(__file__).resolve().parent.parent / "tasks" / "fixture_repo_1"
 
@@ -142,6 +147,93 @@ class TestResetRunDir:
         repo_path = Path(reset_run_dir("never_prepared", FIXTURE, runs_root))
 
         assert snapshot(repo_path) == snapshot(FIXTURE)
+
+
+class TestVersionControlIsNotCopied:
+    """`.git` is excluded from the copy and from the listing. Task 6.3, from F1.
+
+    The first real repository this harness was pointed at crashed on this, so
+    these are regression tests for a failure that actually happened rather than
+    one imagined -- `transcripts/python-slugify_20260923T113847Z.jsonl` is the
+    run that died.
+
+    A local helper builds the fixture rather than `fixture_repo_1`, because the
+    fixtures have no `.git` and giving one a fake `.git` to satisfy a test would
+    be fixture-shaped evidence for a real-repo problem.
+    """
+
+    def repo_with_git(self, tmp_path: Path, *, read_only_pack: bool = False) -> Path:
+        """A source tree with a `.git` in it, shaped like a real shallow clone."""
+        repo = tmp_path / "cloned_repo"
+        (repo / "pkg").mkdir(parents=True)
+        (repo / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+        (repo / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+
+        git = repo / ".git"
+        (git / "hooks").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (git / "hooks" / "pre-commit.sample").write_text("#!/bin/sh\n", encoding="utf-8")
+
+        pack = git / "objects" / "pack"
+        pack.mkdir(parents=True)
+        blob = pack / "pack-deadbeef.pack"
+        blob.write_bytes(b"PACK\x00\x00\x00\x02")
+        if read_only_pack:
+            # What git actually does on Windows, and the whole of why this crashed.
+            import stat
+
+            blob.chmod(stat.S_IREAD)
+        return repo
+
+    def test_git_is_not_copied_into_the_run_directory(self, runs_root, tmp_path):
+        repo = self.repo_with_git(tmp_path)
+
+        repo_path = Path(prepare_run_dir("run_a", repo, runs_root))
+
+        assert not (repo_path / ".git").exists()
+        # The repository's own files survive, `.gitignore` included: it is a file
+        # the project tracks, not version-control internals.
+        assert (repo_path / "pkg" / "mod.py").is_file()
+        assert (repo_path / ".gitignore").is_file()
+
+    def test_git_is_not_listed_for_a_prompt(self, tmp_path):
+        """The listing and the copy must agree. A file shown to the Planner that
+        is not in the run directory would name a path no plan could target."""
+        repo = self.repo_with_git(tmp_path)
+
+        listed = list_repo_files(repo)
+
+        assert not [path for path in listed if path.startswith(".git/")]
+        assert listed == [".gitignore", "pkg/mod.py"]
+
+    def test_a_read_only_pack_no_longer_breaks_the_reset(self, runs_root, tmp_path):
+        """The 6.2 crash, pinned.
+
+        Git marks pack files read-only on Windows. Before the exclusion they were
+        copied into the run directory, `reset_run_dir`'s `rmtree` could not delete
+        them, the directory survived the reset, and `prepare_run_dir`'s `copytree`
+        raised `FileExistsError` at the top of attempt 1. Resetting twice is the
+        assertion: the second call is the one that used to fail.
+        """
+        repo = self.repo_with_git(tmp_path, read_only_pack=True)
+        prepare_run_dir("run_a", repo, runs_root)
+
+        first = Path(reset_run_dir("run_a", repo, runs_root))
+        second = Path(reset_run_dir("run_a", repo, runs_root))
+
+        assert snapshot(first) == snapshot(second)
+        assert (second / "pkg" / "mod.py").is_file()
+        assert not (second / ".git").exists()
+
+    def test_the_source_repository_keeps_its_own_git(self, runs_root, tmp_path):
+        """Excluding it from the copy must not mean touching the original."""
+        repo = self.repo_with_git(tmp_path)
+
+        prepare_run_dir("run_a", repo, runs_root)
+        reset_run_dir("run_a", repo, runs_root)
+
+        assert (repo / ".git" / "HEAD").is_file()
+        assert (repo / ".git" / "objects" / "pack" / "pack-deadbeef.pack").is_file()
 
 
 class TestIndependentCopies:
