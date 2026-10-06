@@ -1,0 +1,61 @@
+[1m============================= test session starts =============================[0m
+platform win32 -- Python 3.14.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: D:\Agentic_Project1\experiments\git_intact\python-slugify
+configfile: pyproject.toml
+testpaths: tests
+plugins: anyio-4.14.2
+collected 126 items
+
+tests\test_add_uppercase_error.py [32m.[0m[32m.[0m[32m.[0m[32m                                    [  2%][0m
+tests\test_legacy.py [32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m [ 42%]
+[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m                                          [ 67%][0m
+tests\test_release.py [31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[31m          [100%][0m
+
+================================== FAILURES ===================================
+[31m[1m__ ReleaseRegressionTests.test_actual_separator_width_and_literal_characters __[0m
+
+self = <tests.test_release.ReleaseRegressionTests testMethod=test_actual_separator_width_and_literal_characters>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_actual_separator_width_and_literal_characters[39;49;00m([96mself[39;49;00m):[90m[39;49;00m
+        [96mself[39;49;00m.assertEqual(slugify([33m'[39;49;00m[33ma b c[39;49;00m[33m'[39;49;00m, separator=[33m'[39;49;00m[33m---[39;49;00m[33m'[39;49;00m, max_length=[94m5[39;49;00m), [33m'[39;49;00m[33ma---b[39;49;00m[33m'[39;49;00m)[90m[39;49;00m
+        [96mself[39;49;00m.assertEqual(slugify([33m'[39;49;00m[33ma b c[39;49;00m[33m'[39;49;00m, separator=[33m'[39;49;00m[33m---[39;49;00m[33m'[39;49;00m, max_length=[94m3[39;49;00m), [33m'[39;49;00m[33ma[39;49;00m[33m'[39;49;00m)[90m[39;49;00m
+>       [96mself[39;49;00m.assertEqual(slugify([33m'[39;49;00m[33ma b c[39;49;00m[33m'[39;49;00m, separator=[33m'[39;49;00m[33m'[39;49;00m, max_length=[94m2[39;49;00m, word_boundary=[94mTrue[39;49;00m), [33m'[39;49;00m[33mab[39;49;00m[33m'[39;49;00m)[90m[39;49;00m
+[1m[31mE       AssertionError: 'a' != 'ab'[0m
+[1m[31mE       - a[0m
+[1m[31mE       + ab[0m
+[1m[31mE       ?  +[0m
+
+[1m[31mtests\test_release.py[0m:206: AssertionError
+[31m[1m____ ReleaseRegressionTests.test_empty_separator_preserves_word_boundaries ____[0m
+
+self = <tests.test_release.ReleaseRegressionTests testMethod=test_empty_separator_preserves_word_boundaries>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_empty_separator_preserves_word_boundaries[39;49;00m([96mself[39;49;00m):[90m[39;49;00m
+        [94mfor[39;49;00m order [95min[39;49;00m ([94mFalse[39;49;00m, [94mTrue[39;49;00m):[90m[39;49;00m
+            [96mself[39;49;00m.assertEqual(slugify([33m'[39;49;00m[33mhello world[39;49;00m[33m'[39;49;00m, max_length=[94m8[39;49;00m, word_boundary=[94mTrue[39;49;00m,[90m[39;49;00m
+                                    separator=[33m'[39;49;00m[33m'[39;49;00m, save_order=order), [33m'[39;49;00m[33mhello[39;49;00m[33m'[39;49;00m)[90m[39;49;00m
+>       [96mself[39;49;00m.assertEqual(slugify([33m'[39;49;00m[33moversized hi all[39;49;00m[33m'[39;49;00m, max_length=[94m5[39;49;00m, word_boundary=[94mTrue[39;49;00m,[90m[39;49;00m
+                                separator=[33m'[39;49;00m[33m'[39;49;00m), [33m'[39;49;00m[33mhiall[39;49;00m[33m'[39;49;00m)[90m[39;49;00m
+[1m[31mE       AssertionError: 'hi' != 'hiall'[0m
+[1m[31mE       - hi[0m
+[1m[31mE       + hiall[0m
+
+[1m[31mtests\test_release.py[0m:216: AssertionError
+[31m[1m__________ SplitCoverageTests.test_modern_word_boundary_empty_token ___________[0m
+
+self = <tests.test_release.SplitCoverageTests testMethod=test_modern_word_boundary_empty_token>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_modern_word_boundary_empty_token[39;49;00m([96mself[39;49;00m):[90m[39;49;00m
+        [90m# word_boundary truncation over tokens that include an empty segment.[39;49;00m[90m[39;49;00m
+>       [96mself[39;49;00m.assertEqual([90m[39;49;00m
+            slugify([33m'[39;49;00m[33ma--b c[39;49;00m[33m'[39;49;00m, word_boundary=[94mTrue[39;49;00m, max_length=[94m3[39;49;00m), [33m'[39;49;00m[33ma-b[39;49;00m[33m'[39;49;00m)[90m[39;49;00m
+[1m[31mE       AssertionError: 'a' != 'a-b'[0m
+[1m[31mE       - a[0m
+[1m[31mE       + a-b[0m
+
+[1m[31mtests\test_release.py[0m:426: AssertionError
+[36m[1m=========================== short test summary info ===========================[0m
+[31mFAILED[0m tests/test_release.py::[1mReleaseRegressionTests::test_actual_separator_width_and_literal_characters[0m - AssertionError: 'a' != 'ab'
+[31mFAILED[0m tests/test_release.py::[1mReleaseRegressionTests::test_empty_separator_preserves_word_boundaries[0m - AssertionError: 'hi' != 'hiall'
+[31mFAILED[0m tests/test_release.py::[1mSplitCoverageTests::test_modern_word_boundary_empty_token[0m - AssertionError: 'a' != 'a-b'
+[31m======================== [31m[1m3 failed[0m, [32m123 passed[0m[31m in 4.52s[0m[31m ========================[0m

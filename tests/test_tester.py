@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from harness.agents.tester import (
     TIMEOUT_EXIT_CODE,
     Tester,
+    strip_ansi,
     tester_failure_from,
 )
 from harness.events import EventLog
@@ -324,6 +325,124 @@ class TestRunningTheRealFixture:
 
         assert not (stale / "discounts.cpython-999.pyc").exists()
         assert result.exit_code == 1
+
+
+class TestColouredOutputIsParsed:
+    """Task 6.4-F4. A target that forces colour must still be read correctly.
+
+    The input is **real captured output**, not a hand-written imitation:
+    `tests/data/coloured_pytest_output.txt` is what
+    `python -m pytest` actually printed inside a clone of `un33k/python-slugify`,
+    whose `pyproject.toml` carries `addopts = "--color=yes"` and therefore colours
+    its output even when stdout is not a tty. 6,129 characters, 528 CSI sequences,
+    exit code 1, three real failures.
+
+    It is committed rather than produced by the test, and that is the only honest
+    option: no fixture in this repo sets `addopts`, and the clone lives outside
+    the repo in `experiments/`, so a test that shelled out to it would pass or
+    fail depending on whether someone had staged a checkout. **This is a replayed
+    real subprocess, not a stubbed one** — the distinction CLAUDE.md draws about
+    stubbed subprocesses is about inventing output, and nothing here is invented.
+
+    `subprocess.run` is replaced so the captured bytes travel the real
+    `_invoke_pytest` path. That is the half worth testing: parsing the text is
+    one thing, and the de-colouring actually being wired in ahead of both parsers
+    while `stdout` stays raw is another.
+    """
+
+    COLOURED = Path(__file__).resolve().parent / "data" / "coloured_pytest_output.txt"
+
+    #: The three real failures in that capture, as pytest reported them.
+    NODEIDS = [
+        "tests/test_release.py::ReleaseRegressionTests::test_actual_separator_width_and_literal_characters",
+        "tests/test_release.py::ReleaseRegressionTests::test_empty_separator_preserves_word_boundaries",
+        "tests/test_release.py::SplitCoverageTests::test_modern_word_boundary_empty_token",
+    ]
+
+    @pytest.fixture
+    def coloured(self) -> str:
+        text = self.COLOURED.read_text(encoding="utf-8")
+        # Guards the premise rather than the behaviour: if the capture ever loses
+        # its escapes, every assertion below would pass for the wrong reason.
+        assert "\x1b[" in text, "the captured output has lost its ANSI escapes"
+        return text
+
+    @pytest.fixture
+    def result(self, monkeypatch, coloured, event_log, tmp_path):
+        """The captured bytes driven through the real `_invoke_pytest`."""
+
+        class Completed:
+            returncode = 1
+            stdout = coloured
+            stderr = ""
+
+        monkeypatch.setattr(
+            "harness.agents.tester.subprocess.run",
+            lambda *args, **kwargs: Completed(),
+        )
+        return Tester(event_log)._run(repo_path=str(tmp_path))
+
+    def test_the_summary_is_read_rather_than_reported_unreadable(self, result):
+        """The whole of F4. Before the fix this was `False`, and the loop read
+        that as `escalated_broken_suite` -- "pytest could not collect" -- on a
+        suite that collected 126 tests and failed 3."""
+        assert result.summary_parsed is True
+
+    def test_the_real_nodeids_are_recovered(self, result):
+        assert result.failed_tests == self.NODEIDS
+
+    def test_no_nodeid_carries_an_escape_sequence(self, result):
+        """A strip that ran after the regex rather than before it could still
+        match and leave colour inside the captured group."""
+        for nodeid in result.failed_tests:
+            assert "\x1b" not in nodeid
+
+    def test_the_traceback_is_extracted_and_de_coloured(self, result):
+        """`_failure_detail` anchors on the same `=` bar, so it was equally
+        defeated -- and its output is prompt-bound, reaching a model through
+        `TesterFailure.traceback`."""
+        assert result.traceback
+        assert "\x1b" not in result.traceback
+        assert "AssertionError" in result.traceback
+
+    def test_raw_stdout_keeps_every_escape(self, result, coloured):
+        """Stripping is for the harness's own reading. The event log keeps what
+        pytest actually wrote, so CLAUDE.md's "the log is self-contained" claim
+        is untouched."""
+        assert result.stdout == coloured
+        assert "\x1b[" in result.stdout
+
+    def test_the_exit_code_still_decides_the_gating(self, result):
+        """F4's fix must not reach the exit-code gating. 1 means a trustworthy
+        per-test outcome set exists; nothing about colour changes that."""
+        assert result.exit_code == 1
+        assert result.passed is False
+
+
+class TestStripAnsi:
+    """The helper on its own. Narrow, because its job is narrow."""
+
+    def test_sgr_colour_is_removed(self):
+        assert strip_ansi("\x1b[31mFAILED\x1b[0m tests/x.py::y") == "FAILED tests/x.py::y"
+
+    def test_uncoloured_text_is_returned_unchanged(self):
+        """Every existing fixture is uncoloured, so this is the common path and
+        it must be a no-op rather than a reformat."""
+        plain = "=== short test summary info ===\nFAILED tests/x.py::y - boom\n"
+
+        assert strip_ansi(plain) == plain
+
+    def test_a_column_zero_anchor_matches_after_stripping(self):
+        """Stated as the property the parsers actually depend on."""
+        assert strip_ansi("\x1b[36m\x1b[1m==== x ====\x1b[0m").startswith("=")
+
+    def test_non_sgr_csi_sequences_go_too(self):
+        """pytest emits only SGR, but a cursor move would be just as invisible to
+        an anchored parser, so the whole CSI class is matched."""
+        assert strip_ansi("a\x1b[2Kb\x1b[1;5Hc") == "abc"
+
+    def test_an_empty_string_is_safe(self):
+        assert strip_ansi("") == ""
 
 
 class TestSummaryParsed:

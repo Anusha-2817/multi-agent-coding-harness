@@ -65,7 +65,7 @@ Build order. Phases 1–2 make **zero API calls**.
 | 3 | LLM client wrapper, real Planner, real Implementer, real Reviewer, `--stub`/`--real` switch | done — 3A (client, Planner, Implementer, `cli.py`), 3A.1 (Anthropic → Gemini), 3B (Reviewer, `--stub`) |
 | 4 | Failure evidence packaging, retry with evidence, escalation output | done — evidence packaging and retry-with-evidence were already built in 2.3/3A; 4A adds the escalation output, 4B `fixture_repo_2`, 4C the run against it (green on attempt 1, trap did not spring) |
 | 5 | Fixture repo 3, Reviewer-rejection scenario, saved transcripts, README update — `fixture_repo_2` moved into Phase 4, which needed it for the recovery run | in progress — 5A (fixture 3, `probe_reviewer.py`), 5.1 (probe pass **8/8**, end-to-end run), 5B (`probe_implementer.py`, **5/5**) |
-| 6 | Export, measure, then fix what actually breaks — generalise the CLI, then run against real repos and let the failures pick the next task | in progress — 6.0.5 + 6.1 (auto-discovery, `--repo`), 6.2 (first real repo: four findings, green end to end), 6.3 (F1 fixed), 6.4 (F1 confirmed on a real `.git`) |
+| 6 | Export, measure, then fix what actually breaks — generalise the CLI, then run against real repos and let the failures pick the next task | in progress — 6.0.5 + 6.1 (auto-discovery, `--repo`), 6.2 (first real repo: four findings, green end to end), 6.3 (F1 fixed), 6.4 (F1 confirmed on a real `.git`), 6.5 (F4 fixed: ANSI stripped before parsing) |
 
 **Phase 5 note.** Now that the scope check runs first, a diff touching an out-of-scope file never reaches the Reviewer — it is caught mechanically and routed back. So the Reviewer-rejection scenario can no longer be built from an out-of-scope edit. Exercising the Reviewer's *judgment* requires a diff that **stays inside `target_files` but is unfaithful to the plan** — right files, wrong change: overreaching within an allowed file, solving a different problem, or gutting behaviour the plan meant to preserve. Design fixture repo 2 or 3 with that in mind.
 
@@ -1126,6 +1126,8 @@ It invokes `[sys.executable, "-m", "pytest"]` so the subprocess uses the harness
 
 `failed_tests` is read out of pytest's "short test summary info" section as text. Not the reporting API, which would couple the harness to a pytest version, and not a plugin, which would be a second thing to keep working. That section is only consulted for exit code 1 — see `summary_parsed` under "TestResult".
 
+**The section is stable; it is not necessarily uncoloured.** A target repo can force colour in its own pytest config, which defeats every column-zero anchor in the parser — found as 6.2's F4 and fixed in 6.5. `tester.strip_ansi` removes CSI sequences from a **copy** before `_parse_summary` and `_failure_detail` run; `TestResult.stdout` keeps the raw bytes. The choice of text parsing stands, and the cost of it is now one named function rather than an unexamined assumption.
+
 The Tester does not own the run directory — `harness/workspace.py` does. The Tester is handed a prepared `repo_path` and never creates, resets, or deletes it.
 
 ---
@@ -1184,7 +1186,7 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**Phase:** 6 — **in progress. 6.0.5, 6.1, 6.2, 6.3 and 6.4 are done: the CLI takes any repo, 6.2's python-slugify run went green end to end after producing four findings and one crash, 6.3 fixed the one finding that stopped a run, and 6.4 confirmed that fix against a real `.git` object store.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
+**Phase:** 6 — **in progress. 6.0.5, 6.1, 6.2, 6.3, 6.4 and 6.5 are done: the CLI takes any repo, 6.2's python-slugify run went green end to end after producing four findings and one crash, 6.3 fixed the one finding that stopped a run, 6.4 confirmed that fix against a real `.git` object store, and 6.5 fixed F4 so a failing attempt on a colour-forcing repo can retry instead of escalating.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
 **The governing rule is now live, not hypothetical:** 6.2 has said what broke, so 6.3 may finally build — but only the one thing 6.2 evidenced. See "The next two steps" below, which are fixed and should not be re-chosen from 6.3's table.
 **Last completed:** Tasks 6.0.5 (auto-discover the failure) and 6.1 (generalise the CLI), built together in one session because both change nothing but `cli.py`'s argument handling and splitting them would have been two commits touching the same forty lines. Suite is **464 tests, all passing, 219s** — up from 432; the 32 new ones are all in `test_cli.py` (66 → 98).
 
@@ -1686,6 +1688,123 @@ Stated plainly, because a green run is the easiest place to over-claim:
   without `_parse_summary` running. **F4's actual consequence has still never been
   observed in a run**, only in direct measurement of the parser.
 
+### 6.5 — F4 fixed. Colour is stripped from a copy, and the raw output is kept.
+
+**One new function and three call sites, all inside `harness/agents/tester.py`.**
+`strip_ansi(text)` removes ANSI CSI sequences; `_invoke_pytest` builds
+`plain_stdout = strip_ansi(stdout)` and hands *that* to `_failure_detail` and
+`_parse_summary`. `TestResult.stdout` is still the bytes pytest wrote.
+
+Nothing else moved: not the exit-code gating, not `summary_parsed`'s rule, not
+the loop, not the agents, not the event log's payloads. Suite is **479 tests, all
+passing, 197s** — up from 468 by exactly the eleven added below.
+
+**The regex matches the whole CSI class** (`\x1b\[[0-?]*[ -/]*[@-~]`), not just
+SGR colour. pytest emits only SGR, but a stray cursor-move or erase-line would be
+exactly as invisible to a parser anchored at column zero, and narrowing the class
+would buy nothing.
+
+**The rejected alternative was passing `--color=no` to the subprocess.** Three
+reasons against it, and the third is the one that decides it: the target's own
+`addopts` can still be appended after our flag; it changes the *invocation*
+rather than our reading of it, so the Tester would no longer be reporting what
+the suite actually does when run normally; and reading the output correctly is
+the harness's problem to solve on the harness's side.
+
+#### What this does and does not change about prompt-bound text — flagged, not decided
+
+Three fields carry pytest output toward a model. **The fix as scoped changes one
+of them, and the inconsistency is worth naming rather than smoothing over:**
+
+| field | reaches a model via | coloured after 6.5? |
+| --- | --- | --- |
+| `TestResult.traceback` | `TesterFailure.traceback` | **no** — `_failure_detail` now reads the stripped copy |
+| `TesterFailure.stdout_tail` | truncated from `TestResult.stdout` | **yes**, still raw |
+| `failure_input` | `cli.discover_failure` → the Planner | **yes**, still raw |
+
+`traceback` was de-coloured as a direct consequence of stripping before the
+traceback extraction, which is what this task asked for. The other two were left
+alone, which means a retry prompt can now carry a clean `Failure detail:` block
+above a colour-escaped `stdout_tail`, and the Planner still receives a
+`failure_input` with 528 escapes in it.
+
+**This is an open question, deliberately not answered here.** Arguments both
+ways, recorded so it can be decided on evidence:
+
+- **For stripping them too:** escapes are tokens a model pays for and cannot act
+  on, and the mixed treatment within one prompt is odd on its face.
+- **For leaving them:** `failure_input`'s standing rule is that it is **verbatim,
+  never sanitized** — banner, plugin versions, stale `rootdir:` and all — because
+  "real failure reports are noisy, and the noise is part of the input". Colour is
+  noise of exactly that kind, and a Planner that only works on de-coloured output
+  is overfit in the same way one that needs a trimmed header is. Both runs on
+  python-slugify received coloured `failure_input` and the Planner was correct
+  anyway, twice, on two models.
+
+**The revisit trigger:** a real run where a model demonstrably misreads coloured
+prompt text. Nothing has shown that yet, and the "verbatim" rule should not be
+weakened on tidiness.
+
+#### The tests, and the three that reproduce F4
+
+`test_tester.py` gained `TestColouredOutputIsParsed` (6) and `TestStripAnsi` (5).
+
+**The input is real captured output, committed as
+`tests/data/coloured_pytest_output.txt`** — 6,129 characters, **528 CSI
+sequences**, exit code 1, three real failures, exactly what `python -m pytest`
+printed inside a clone of `un33k/python-slugify`. It is committed rather than
+produced at test time because no fixture in this repo sets `addopts` and the
+clone lives outside the repo in `experiments/`, so a test that shelled out to it
+would pass or fail on whether someone had staged a checkout. **It is a replayed
+real subprocess, not a stubbed one** — the objection this file raises to stubbed
+subprocesses is about inventing output, and nothing here is invented. A guard
+asserts the capture still contains escapes, so losing them would fail loudly
+rather than making every other assertion pass for the wrong reason.
+
+`subprocess.run` is replaced so those bytes travel the real `_invoke_pytest`
+path. Parsing the text is one thing; the de-colouring being wired in ahead of
+both parsers *while `stdout` stays raw* is the half that needed a test.
+
+**Three of the eleven fail on the old code**, confirmed by reverting the wiring
+and re-running rather than assumed: `summary_parsed` was `False`, `failed_tests`
+was `[]`, and `traceback` carried escapes. The other eight pass either way and
+each is a guard rather than a reproduction — raw `stdout` keeping its escapes,
+the exit-code gating being untouched, and the five helper tests. **One of those
+eight deserves naming: `test_no_nodeid_carries_an_escape_sequence` passes
+vacuously on the old code**, because an empty `failed_tests` has no nodeid to
+check. It guards against a future strip applied *after* the regex rather than
+before it; it does not reproduce F4.
+
+#### The observable change, and where to see it
+
+**Discovery against python-slugify now reports 3 failing tests instead of 0.**
+Measured through the real `cli.discover_failure` after the fix:
+
+```
+exit_code     : 1
+summary_parsed: True          <- was False
+failed_tests  : 3             <- was []
+   tests/test_release.py::ReleaseRegressionTests::test_actual_separator_width_and_literal_characters
+   tests/test_release.py::ReleaseRegressionTests::test_empty_separator_preserves_word_boundaries
+   tests/test_release.py::SplitCoverageTests::test_modern_word_boundary_empty_token
+banner        : auto-discovered (3 failing test(s))    <- was "(0 failing test(s))"
+stdout        : still coloured, 6,129 chars
+```
+
+Both python-slugify transcripts recorded above show
+`auto-discovered (0 failing test(s))` in their banners. **That line is now wrong
+for any future run and right for those two** — they were produced before this
+fix, and the under-report was F4 showing through. Do not read the old banners as
+a defect in those runs.
+
+**What is still not measured.** F4's actual consequence — a failing attempt
+misrouted to `escalated_broken_suite` instead of retrying — **was never observed
+in a run and still has not been.** It was proven by direct measurement of the
+parser, and the fix is verified the same way plus a replayed real capture. The
+first run that *fails* an attempt on a colour-forcing repo is what would have
+demonstrated the bug and now demonstrates the fix; that run is the next step
+below, and it is now unblocked.
+
 ### The next two steps, fixed in advance and not to be re-chosen
 
 6.3's table says to pick exactly one fix based on what 6.2 evidenced, and to
@@ -1723,15 +1842,13 @@ generalises. Two things shape the choice of bug:
    Planner produces an unrecoverable run, not a retry — v1 never replans. See
    "Fixture design: the recoverability constraint".
 
-**F4 is coupled to this, and the coupling is the reason it may have to come
-first.** On any repo whose pytest config forces colour, a failing attempt is
-misread as `summary_parsed=False` and **escalates instead of retrying** — so the
-retry this next step exists to produce would be destroyed by the very mechanism
-it needs. python-slugify forces colour. So either the next repos must be checked
-for `addopts` / `--color` before a call is spent, or **F4 gets fixed first**.
-Check the candidates' pytest config during staging; if they force colour, fix F4
-and then run. That is a decision to make with the candidates in front of you,
-not now.
+**That coupling is now resolved: F4 was fixed first, in 6.5.** The reasoning
+stood that on any colour-forcing repo a failing attempt is misread as
+`summary_parsed=False` and **escalates instead of retrying**, so the retry this
+step exists to produce would have been destroyed by the mechanism it needs —
+and python-slugify forces colour. Candidates no longer need screening for
+`addopts`, and a repo that forces colour is now a *useful* target rather than a
+disqualifying one: it exercises the 6.5 fix on the path that matters.
 
 **F2 and F3 stay unbuilt.** F2 is a measured cost the Planner has handled at 9.2x
 twice; F3 is real but has never blocked a run that was set up correctly. Neither

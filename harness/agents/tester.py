@@ -40,6 +40,48 @@ PYTEST_TESTS_FAILED = 1
 # `FAILED tests/test_orders.py::test_name` or `FAILED ...::test_name - AssertionError: ...`
 _SUMMARY_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(.+)$")
 
+# CSI sequences -- `ESC [ ... <final byte>`. pytest's colour output is all SGR
+# (`\x1b[31m`, `\x1b[0m`), but the class is matched whole rather than narrowed to
+# `m`: a stray cursor-move or erase-line would be just as invisible to a parser
+# anchored at column zero, and narrowing buys nothing.
+_ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    """Return `text` with ANSI CSI escape sequences removed.
+
+    **Task 6.5, fixing 6.2's finding F4.** A target repo can force colour on in
+    its own pytest config — `python-slugify` carries `addopts = "--color=yes"`,
+    which colours output even when stdout is not a tty, and the Tester always
+    captures via `subprocess`. Measured on a real capture, committed as
+    `tests/data/coloured_pytest_output.txt`: 528 escape sequences in 6,129
+    characters.
+
+    Both parsers below anchor at column zero: `_parse_summary` looks for a line
+    that `startswith("=")` and matches rows against `^(?:FAILED|ERROR)`, and
+    `_failure_detail` looks for the same `=` bar. Coloured lines begin
+    `\\x1b[36m\\x1b[1m====` and `\\x1b[31mFAILED`, so every anchor misses, no
+    summary section is found, and `_parse_summary` reports
+    `([], summary_parsed=False)` on an ordinary test failure. The loop reads that
+    as `escalated_broken_suite` — "pytest could not collect" — which is a
+    **misrouted status**, not merely a lost list: a failing attempt escalates
+    instead of retrying, so on any colour-forcing repo the retry path is
+    unreachable.
+
+    **This is applied to a copy, and the raw bytes are kept.** `TestResult.stdout`
+    stays exactly what pytest wrote, so the event log keeps the real output and
+    CLAUDE.md's "a run's log is self-contained" claim is unaffected. Stripping is
+    for the harness's own reading, not a correction of what the target emitted.
+
+    The alternative was passing `--color=no` to the subprocess. Rejected: the
+    target's `addopts` would still be appended after our flag on some pytest
+    versions, it changes the invocation rather than our parsing of it, and the
+    Tester's job is to report what the suite actually said. Reading the output
+    correctly is our problem to solve on our side.
+    """
+    return _ANSI_CSI.sub("", text)
+
+
 # Caches are cleared inside the run directory, not just at copy time -- the
 # previous attempt's pytest run wrote its own. Stale caches cause phantom results.
 _CACHE_DIRS = ("__pycache__", ".pytest_cache")
@@ -185,14 +227,19 @@ class Tester(Agent):
 
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
-        detail = _failure_detail(stdout)
+
+        # Parsed from a de-coloured copy; `stdout` below is still the raw bytes.
+        # See `strip_ansi` -- a target that forces colour in its own `addopts`
+        # otherwise defeats every column-zero anchor in both parsers.
+        plain_stdout = strip_ansi(stdout)
+        detail = _failure_detail(plain_stdout)
 
         if completed.returncode == PYTEST_OK:
             # pytest prints no summary section when nothing failed. Its absence
             # is expected here, not a failure to read one.
             failed_tests, summary_parsed = [], True
         elif completed.returncode == PYTEST_TESTS_FAILED:
-            failed_tests, summary_parsed = _parse_summary(stdout)
+            failed_tests, summary_parsed = _parse_summary(plain_stdout)
         else:
             # Interrupted, internal error, usage error, or nothing collected.
             # The suite never produced a per-test outcome set, so which tests
@@ -204,8 +251,13 @@ class Tester(Agent):
             failed_tests=failed_tests,
             summary_parsed=summary_parsed,
             # stderr is the fallback because a crash before the FAILURES block
-            # exists still has to leave the Implementer something to read.
-            traceback=detail or (stderr.strip() if completed.returncode != PYTEST_OK else ""),
+            # exists still has to leave the Implementer something to read. It is
+            # de-coloured for the same reason `detail` is: both fill this one
+            # field, and leaving the treatment to depend on which branch filled
+            # it would put escapes in front of a model on the crash path only.
+            traceback=detail
+            or (strip_ansi(stderr).strip() if completed.returncode != PYTEST_OK else ""),
+            # Raw, deliberately. The log keeps what pytest actually wrote.
             stdout=stdout,
             exit_code=completed.returncode,
         )
