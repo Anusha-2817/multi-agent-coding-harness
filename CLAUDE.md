@@ -1112,7 +1112,7 @@ A parse failure must not become an agent retry. The loop's `evidence` says *the 
 | -------------- | ----------------------------------------------------------------- |
 | Language       | Python 3.14, no agent framework                                   |
 | LLM transport  | official `google-genai` SDK — see "The one dependency, and where it stops" |
-| LLM model      | `llm.DEFAULT_MODEL` — `gemini-3.6-flash` today, `response_json_schema`, dynamic thinking (default) |
+| LLM model      | `llm.DEFAULT_MODEL` — `gemini-3.5-flash` today, `response_json_schema`, dynamic thinking (default) |
 | State          | Pydantic v2                                                       |
 | Diff rendering | `difflib.unified_diff` over `edits` + baseline                    |
 | Test execution | `subprocess` running `pytest`                                     |
@@ -1543,6 +1543,55 @@ Its substance is not: F1–F4, the pre-run predictions, the Planner results and 
 the transcripts were already in `transcripts/`. **The lesson is the convention
 rather than the cleanup: fold findings into CLAUDE.md as they are established,
 not at the end of a session.**
+
+#### The model changed: runs from here use `gemini-3.5-flash`
+
+`llm.DEFAULT_MODEL` is now **`gemini-3.5-flash`**. It was `gemini-3.6-flash` for
+every run recorded above. One line in `harness/llm.py`; nothing else in the
+harness moved.
+
+**Every Planner result in this file up to and including 6.2 was produced by
+`gemini-3.6-flash`. Runs from 6.4 onward are a different model, so comparisons
+across that line are not like-for-like.** This matters for exactly one claim and
+it is worth naming precisely rather than generally: the python-slugify Planner
+result — right file, right function, `_legacy.py` dispatch trap avoided twice on
+independent calls — is **two data points about 3.6, not about this harness's
+Planner in the abstract**. If 6.4's Planner lands in the same place, that is a
+*third* data point and a *first* for 3.5, not a third for the same thing. If it
+lands somewhere else, the model change is a live confound and must be named
+before the prompt is blamed.
+
+The four findings are unaffected, and the reason is that none of them is about a
+model. F1 is `copytree` and `rmtree`; F2 is a character count through
+`render_repo`; F3 is `sys.executable`; F4 is a regex against ANSI escapes. All
+four were measured without a model in the path, and all four stand.
+
+**On the standing rule against model literals in this file.** The rule — *"do not
+reintroduce a model literal into a test or into this file; name
+`llm.DEFAULT_MODEL`"* — exists to stop a literal going stale while the constant
+moves, which is exactly the three-homed drift 3B had to clean up. Two literals
+here are deliberate exceptions, and the distinction is drift-exposure:
+
+- The **Tech stack** row says "`gemini-3.5-flash` today", and the hedge is doing
+  real work — it is a snapshot that must be updated with the constant. It was
+  updated in this change.
+- The **historical** claims above name `gemini-3.6-flash` as the model that
+  produced a specific recorded result. Those **cannot** go stale, because the past
+  does not change. A note saying "6.2 used `llm.DEFAULT_MODEL`" would be worse
+  than useless: it would silently re-point at whatever the constant becomes and
+  misattribute old evidence to a new model.
+
+The rule still holds everywhere else, and in particular **no test may pin a
+literal to mean "the default"** — `test_llm.py` asserts
+`LLMClient().model == DEFAULT_MODEL`, which is why this change broke nothing. The
+two `gemini-2.5-flash` strings in `test_llm.py` are a *fake SDK's* served model
+version, and `test_the_served_model_version_is_preferred_over_the_configured_id`
+depends on their being unrelated to the default — binding them to the constant
+would destroy the test.
+
+**Known stale, deliberately out of scope for this change:** `README.md`'s model
+row still reads `gemini-3.6-flash`. This change was scoped to one line of
+`harness/llm.py` plus this file.
 
 ### The next two steps, fixed in advance and not to be re-chosen
 
