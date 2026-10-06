@@ -716,3 +716,23 @@ def _usage_of(usage: Any) -> dict[str, int]:
         if isinstance(value, int):
             counted[name] = value
     return counted
+
+
+# llm.py takes a raw API call and turns it into a guaranteed-structured Pydantic object, or raises a clear error explaining why it couldn't.
+
+# The flow:
+
+# call Gemini API
+# → get text back
+# → extract JSON from text
+# → validate against schema (Plan / ReviewVerdict / ImplementerResponse)
+# → if valid → return LLMResult with the object
+# → if invalid → send back to model with "fix this" (repair turn)
+# → if still invalid → raise LLMResponseError
+
+# Error classes are just so the caller knows why it failed:
+
+# Network died → LLMTransportError
+# Model refused → LLMRefusalError
+# Response cut off → LLMTruncatedError
+# JSON wrong shape → LLMResponseError

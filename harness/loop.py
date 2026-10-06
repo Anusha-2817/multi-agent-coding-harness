@@ -60,7 +60,7 @@ def render_diff(repo_path: str | Path, edits: list[FileEdit]) -> str:
     check compares this output literally:
 
     - **No timestamps.** `unified_diff`'s date arguments are left empty. Filling
-      them would make every diff unique and livelock unreachable.
+      that would make every diff unique and livelock unreachable.
     - **Stable labels.** `a/<path>`, `b/<path>`, built from the normalised edit
       path -- never an absolute path, which would embed `task_id` and with it a
       timestamp.

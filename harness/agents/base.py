@@ -150,10 +150,10 @@ class Agent(ABC):
         contract = self.contract
         self._attempt = state.attempt_count
 
-        inputs = self._collect(state, contract)
+        inputs = self._collect(state, contract)# pulls ONLY requires + optional from state
         self._check_signature(inputs)
 
-        value = self._run(**inputs)
+        value = self._run(**inputs)# passes ONLY those fields to _run
         if value is None:
             self._violation(
                 f"produced None for {contract.produces!r}; an agent that ran and "

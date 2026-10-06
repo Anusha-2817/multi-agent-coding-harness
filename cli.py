@@ -786,17 +786,17 @@ def main(argv: list[str] | None = None) -> int:
     task_id = make_task_id(repo_dir_name(repo_dir))
     event_log = EventLog(task_id)
 
-    if task is not None:
+    if task is not None:#--task passed
         task_description = task["task_description"]
         failure_input = task["failure_input"]
         failure_source = f"read from {args.task}"
     else:
         task_description = args.description or DEFAULT_DESCRIPTION
 
-        if args.failure is not None:
+        if args.failure is not None:# --failure passed 
             failure_input = args.failure
             failure_source = "supplied with --failure"
-        else:
+        else:#none passed 
             result = discover_failure(repo_dir, event_log)
 
             if result.passed:
