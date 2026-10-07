@@ -1854,6 +1854,71 @@ disqualifying one: it exercises the 6.5 fix on the path that matters.
 twice; F3 is real but has never blocked a run that was set up correctly. Neither
 has evidenced a failure, and the phase rule has not changed.
 
+### 6.2 round 2 — three repos staged, predictions written before any run
+
+**Goal:** give a retry the chance to occur naturally. Six runs in a row passed on attempt 1. Staging only: no harness code changed, `cli.py` not run, clones not committed (they live outside this repo, in `experiments/`).
+
+**Construction rule (mechanical, not hand-edited).** Full clone, `git checkout --detach <fix>`, baseline run, then `git checkout <fix>^ -- <source file>` and `git reset` so the bug is an *uncommitted working-tree change*. The fix commit's new test stays. `git diff HEAD` in each clone is exactly the revert of the upstream fix. The Planner sees the repo untouched: nothing was hidden.
+
+**Two exposure questions, answered from code and a grep of the real prompt, not asserted:**
+- *Does an uncommitted bug expose the fix?* No. `grep -n git harness/*.py harness/agents/*.py cli.py` finds no git invocation; `.git` is excluded from the copy and from `list_repo_files`. The Planner sees `render_repo` of the copied working tree (non-test `.py` inlined, everything else by path), `failure_input` and the description. Checked on the real `render_user_message`: strings unique to each upstream fix are absent from the schema and xmltodict prompts. The one hit, `passer` in the inflection prompt, is the test id `passerby-passersby` in the failure text; `inflection.py` itself contains no `passer`.
+- *Can a clone named `schema` shadow a harness import?* No. The harness process runs from `mach/`, so `experiments/` is never on its `sys.path`; nothing under `mach/` or in `.venv` imports `schema`, `xmltodict` or `inflection` (grepped; none is installed). The Tester's `python -m pytest` subprocess does put the target's cwd first on `sys.path`, which is what we want, and no pytest plugin imports those names.
+
+| | schema | xmltodict | inflection |
+| --- | --- | --- | --- |
+| path | `experiments/schema` | `experiments/xmltodict` | `experiments/inflection` |
+| upstream | keleshev/schema | martinblech/xmltodict | jpvanhal/inflection |
+| fix commit (HEAD of clone) | `15158c5391eaacbc1e4813b3529ea035fd2cf03e` | `aa165113bef2b3a1a822209863343b9dc9ffe43a` | `1969b3a06a9ff06d023863e388cf8af01978d297` |
+| buggy file (uncommitted) | `schema/__init__.py` | `xmltodict.py` | `inflection.py` |
+| baseline at fix commit | 124 passed | 104 passed | 465 passed |
+| red after bug | 1 failed | 3 failed | 3 failed |
+| failing nodeids | `test_schema.py::test_wrong_key_reports_key_schema_error` | `tests/test_dicttoxml.py::test_non_string_text_with_attributes`, `::test_none_text_with_short_empty_elements_and_attributes`, `::test_none_attribute_serializes_as_empty_string` | `test_inflection.py::test_pluralize_singular[passerby-passersby]`, `::test_singularize_plural[passerby-passersby]`, `::test_pluralize_plural[passerby-passersby]` |
+| files / full Planner message | 20 / ~11.5k tok | 21 / ~6.5k tok | 15 / ~5.9k tok |
+| pytest `addopts` | none | none | `--doctest-modules`; no colour |
+| forces colour | no | no | no |
+
+None forces colour, so these runs do not exercise 6.5 in a real run; that stays open.
+
+**Pre-checks (free, real functions, scratch `runs/` and `logs/`):** `list_repo_files` saw 20/21/15 files, 0 under `.git/`. `discover_failure` reported exit 1, `summary_parsed=True`, and 1/3/3 failing, matching the nodeids above exactly. Discovery left each clone's `git status` byte-identical (caches cleared). `prepare_run_dir` then `reset_run_dir` survived with no `.git` in the run dir, and each source clone kept its `.git` with 3 read-only pack files.
+
+**Quota cost per run.** Calls are Planner + (Implementer + Reviewer) per attempt; the Tester is not an API call. First-try green = **3 calls**; one retry = **5**; five attempts to the cap = **11** (`MAX_ATTEMPTS = 5`). A parse-ladder repair turn adds calls beyond these. Livelock or an early escalation lands between the numbers, and a human rejection at the gate costs an attempt without a Tester call.
+
+**Predictions, written before any run.** Probabilities are mine and are for checking, not for defending afterwards. "Retry" means a failing Tester verdict or a Reviewer rejection followed by a second attempt, whatever the end status.
+
+*schema* (prediction: Planner targets `schema/__init__.py`, ~97%; there is only one source file).
+The test function has three sequential asserts (Regex key with `error=`, default message with no `error=`, `And` key with `error=`), and the failure text shows only the first. A Regex-specific or `e`-clobbering first fix can pass assert 1 and fail 2 or 3, which is the natural retry.
+- green attempt 1, 3 calls: 40%
+- retry then green, 5-7 calls: 35%
+- escalation (cap, livelock) or Reviewer-stuck: 15%
+- other (plan misses the `except SchemaError: pass`, or a patch in `SchemaWrongKeyError` / `_prepend_schema_name`): 10%
+Branches: *wrong place* (the exception class or the message helper instead of the dict-validation branch); *incomplete* (records the key error but does not surface it, or surfaces it unconditionally and breaks the default-message assert); *retry* (assert 1 passes, 2 or 3 fails); *escalation* (same wrong patch on every attempt, livelock).
+
+*xmltodict* (prediction: Planner targets `xmltodict.py`, ~99%).
+Three tests name three symptoms, all visible in the failure text, so a good plan may enumerate every site. A fix that edits only `_convert_value_to_string` or only the `#text` site leaves attribute tests red (measured: a cdata-only patch leaves 2 of 3 red).
+- green attempt 1: 55%
+- retry then green: 25%
+- escalation: 10%
+- other: 10%
+Branches: *incomplete* (cdata only, or the helper only); *retry*; *green but incomplete against upstream*: the `xmlns` attribute site has no test, so a suite-green patch can still differ from upstream. That is a green, and it is not a failure and not a Reviewer rejection to be narrated later. Check it with `git diff HEAD` against the final diff and record it as "green, xmlns site missed" if so. *Wrong file*: not possible; one source file.
+
+*inflection* (prediction: Planner targets `inflection.py`, ~99%; weakest of the three, the plan nearly determines the fix).
+Rule position decides the outcome: `passerby` ends in `rby`, so the generic `([^aeiouy]|qu)y$` rule (`passerbies`) wins unless the new rule is earlier. Measured on scratch copies of the bug state (each variant run through the real suite): both rules placed before the generic ones = 465 passed; `PLURALS` rule only = 1 red (`test_singularize_plural`); `s?`-less plural pattern with both lists = 1 red (`test_pluralize_plural`); both rules appended at the end of their lists = 2 red (`test_pluralize_singular`, `test_pluralize_plural`). (An earlier scratch experiment that reported "all 3 red" for append-at-end was a bad patch and is superseded by this measurement.)
+- green attempt 1: 55%
+- retry then green: 25%
+- escalation: 10%
+- other (e.g. Reviewer rejects a correct fix): 10%
+Branches: *incomplete* (one list only, or an `s?`-less pattern: each leaves exactly one test red, so the retry evidence is narrow and specific); *wrong position* (appended after the generic rule: 2 red, and the failure evidence shows `passerbies`, which is what a retry can act on); *escalation* (a plan that says "append" and an Implementer that follows it five times).
+
+**Readings fixed in advance.** A retry that goes green is the first real exercise of `render_evidence` and `RESET_NOTICE` and is the headline. Three first-try greens would say these bugs are also fully determined by a correct plan and that the next step is a different bug shape, not more of these. Do not call a first-try green "as expected" for xmltodict or schema without checking the diff against the upstream fix first.
+
+**Run commands** (one at a time, from `mach/`; ~3 calls each if green first try):
+
+```
+.venv\Scripts\python.exe cli.py --repo ..\experiments\schema
+.venv\Scripts\python.exe cli.py --repo ..\experiments\xmltodict
+.venv\Scripts\python.exe cli.py --repo ..\experiments\inflection
+```
+
 ### Phase 5, complete as recorded
 
 **All three probe passes are complete.** The Reviewer probe scored **8/8**, the Implementer probe **5/5**, and the conditional end-to-end `fixture_repo_3` run went green on attempt 1. Both halves of retry-on-failure are measured directly; see "What the retry mechanism proved, together".
