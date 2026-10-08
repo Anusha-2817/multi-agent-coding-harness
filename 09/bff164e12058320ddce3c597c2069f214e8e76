@@ -1,0 +1,91 @@
+harness/llm.py
+  s_fa8aab5a2f2901::t_870cc600b7d1e6 398,407-410,421,466,485-487,493,495
+  s_fa8aab5a2f2901::t_e0fa39336f367c 182-188,191,426-430
+harness/agents/base.py
+  s_fa8aab5a2f2901::t_e0fa39336f367c 36,157-165
+tests/test_llm.py
+  s_fa8aab5a2f2901::t_e0fa39336f367c 33,452-477,479-503
+  s_fa8aab5a2f2901::t_870cc600b7d1e6 30,408,412,415-418,420,450-451
+  s_fa8aab5a2f2901::t_b18788546b9500 478
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "09bff164e12058320ddce3c597c2069f214e8e76",
+  "branch": "main",
+  "prompts": {
+    "s_fa8aab5a2f2901": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ee1e3431-2bdc-4b18-9806-ac71c77f6832",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:d7e3c0f2ce140b8952ee471cc779d03173357cfb826d0674b0b5687053c3cdc0",
+      "total_additions": 149,
+      "total_deletions": 32,
+      "accepted_lines": 1634,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_fa8aab5a2f2901": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ee1e3431-2bdc-4b18-9806-ac71c77f6832",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:d7e3c0f2ce140b8952ee471cc779d03173357cfb826d0674b0b5687053c3cdc0",
+      "stats": {
+        "total_additions": 149,
+        "total_deletions": 32,
+        "accepted_lines": 1634,
+        "overriden_lines": 0,
+        "files": {
+          "harness/agents/base.py": {
+            "total_additions": 10,
+            "total_deletions": 1,
+            "accepted_lines": 10,
+            "overriden_lines": 0
+          },
+          "harness/agents/implementer.py": {
+            "total_additions": 6,
+            "total_deletions": 0,
+            "accepted_lines": 6,
+            "overriden_lines": 0
+          },
+          "harness/agents/planner.py": {
+            "total_additions": 6,
+            "total_deletions": 6,
+            "accepted_lines": 6,
+            "overriden_lines": 0
+          },
+          "harness/llm.py": {
+            "total_additions": 26,
+            "total_deletions": 11,
+            "accepted_lines": 26,
+            "overriden_lines": 0
+          },
+          "tests/test_llm.py": {
+            "total_additions": 65,
+            "total_deletions": 10,
+            "accepted_lines": 843,
+            "overriden_lines": 0
+          },
+          "tests/test_prompts.py": {
+            "total_additions": 36,
+            "total_deletions": 4,
+            "accepted_lines": 743,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
