@@ -1,0 +1,13 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "5993a4c465c6b2b5a2004125585ef1fe58135eed",
+  "branch": "main",
+  "prompts": {},
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  }
+}
