@@ -41,6 +41,11 @@ from harness.workspace import read_repo_file
 # reason to keep fixture files small rather than to reach for streaming.
 MAX_TOKENS = 16000
 
+# Thinking effort. The output is the whole file again, which on a ~38k-character
+# file is most of MAX_TOKENS, so thinking left at the default can crowd it out.
+# An effort setting, not a token cap: MAX_TOKENS is still the only hard ceiling.
+THINKING_LEVEL = "LOW"
+
 
 class ImplementerResponse(BaseModel):
     """The wire shape of one Implementer call: `{"edits": [...]}`.
@@ -270,6 +275,7 @@ class Implementer(Agent):
             user=user,
             schema=ImplementerResponse,
             max_tokens=MAX_TOKENS,
+            thinking_level=THINKING_LEVEL,
         )
 
         self.log(event="llm_response", payload=result.log_payload())

@@ -25,11 +25,11 @@ from harness.workspace import list_repo_files, read_repo_file
 # and returned no text (`LLMTruncatedError`).
 MAX_TOKENS = 16000
 
-# A ceiling on thinking alone, so a long deliberation cannot consume the budget
-# the plan itself needs. Kept well under MAX_TOKENS; the difference is the room
-# guaranteed for the output. Above the 7,680 the one successful long-prompt run
-# used, so it does not bind on a run that worked.
-THINKING_BUDGET = 8192
+# Thinking effort. At the default (medium) one real run spent 15,358 tokens
+# thinking against 228 of output on this prompt, and others ran the budget out.
+# This is an effort setting, not a token cap; MAX_TOKENS is still the only
+# hard ceiling.
+THINKING_LEVEL = "LOW"
 
 # A source file longer than this is listed rather than inlined. Fixture repos are
 # 5-10 small files by design, so this should never fire -- it is here so that if
@@ -172,7 +172,7 @@ class Planner(Agent):
             user=user,
             schema=Plan,
             max_tokens=MAX_TOKENS,
-            thinking_budget=THINKING_BUDGET,
+            thinking_level=THINKING_LEVEL,
         )
 
         # The call's cost and shape, not the plan. `agent_produced` from the base

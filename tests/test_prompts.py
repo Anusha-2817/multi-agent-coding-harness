@@ -104,9 +104,15 @@ class FakeClient:
         self.value = value
         self.calls: list[dict] = []
 
-    def complete_structured(self, *, system, user, schema, max_tokens, thinking_budget=None):
+    def complete_structured(self, *, system, user, schema, max_tokens, thinking_level=None):
         self.calls.append(
-            {"system": system, "user": user, "schema": schema, "max_tokens": max_tokens}
+            {
+                "system": system,
+                "user": user,
+                "schema": schema,
+                "max_tokens": max_tokens,
+                "thinking_level": thinking_level,
+            }
         )
         return LLMResult(
             value=self.value,
@@ -505,6 +511,32 @@ class TestTheImplementerAgent:
         Implementer(event_log, client).run(state(repo, plan=PLAN))
 
         assert logged(event_log)[0]["payload"]["evidence_kind"] is None
+
+
+class TestThinkingLevels:
+    """What each agent asks of the client. No API call: the fake records it."""
+
+    def test_the_planner_asks_for_low_thinking(self, repo, event_log):
+        client = FakeClient(PLAN)
+
+        Planner(event_log, client).run(state(repo))
+
+        assert client.calls[0]["thinking_level"] == "LOW"
+
+    def test_the_implementer_asks_for_low_thinking_and_keeps_its_budget(self, repo, event_log):
+        client = FakeClient(ImplementerResponse(edits=[FileEdit(path=DISCOUNTS, new_content="x\n")]))
+
+        Implementer(event_log, client).run(state(repo, plan=PLAN))
+
+        assert client.calls[0]["thinking_level"] == "LOW"
+        assert client.calls[0]["max_tokens"] == 16000
+
+    def test_the_reviewer_leaves_thinking_at_the_default(self, repo, event_log):
+        client = FakeClient(ReviewVerdict(reason="fine", approved=True, violated_constraints=[]))
+
+        Reviewer(event_log, client).run(state(repo, plan=PLAN, diff=DIFF))
+
+        assert client.calls[0]["thinking_level"] is None
 
 
 # -- the Reviewer's prompt ---------------------------------------------------
