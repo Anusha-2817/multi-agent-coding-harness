@@ -1935,6 +1935,7 @@ Branches: *incomplete* (one list only, or an `s?`-less pattern: each leaves exac
 
 **Open items.**
 - The Reviewer's thinking is not capped.
+- A later run showed `LOW` still allowing 8,253 Implementer thinking tokens and a truncation at 16,000; see F7.
 - The 487 tests check that the right settings are sent, not that `LOW` reduces thinking. Only live runs show that.
 
 **Interview line.** A real repo broke a limit the fixtures never reached. The harness stopped safely with a clear error, and the logging gap was found and fixed.
@@ -1986,6 +1987,31 @@ Every stop reason was `STOP`. Thinking plus output never exceeded 13,495 against
 #### Candidate next step — not built, not decided
 
 **A diff-based or hunk-based Implementer**: have the model emit only the changed region (search/replace blocks or hunks) and let the harness apply them, so unrelated lines cannot be re-typed. Costs to weigh before choosing it: it reverses the ruling in "Edits, not patches" (which chose full replacement because models emit invalid unified diffs, so any replacement would need an exact-match anchor scheme and its own failure mode), it touches `FileEdit`, the Implementer contract and the scope/diff rendering, and it is only worth doing if the corruption is confirmed to come from full-file output. The cheaper discriminating evidence is a second run on this repo with the Implementer back at the default thinking level, or a run on a smaller file: either would separate "full-file output" from "LOW".
+
+### F7 — schema: a retry on Tester evidence overran the Implementer's 16,000 tokens
+
+`logs/schema_20261008T122304Z.jsonl` (not copied to `transcripts/`).
+
+**What happened.**
+- **Attempt 1** was approved by the Reviewer and **applied to disk**. The Tester then failed it: `test_schema.py::test_dict` and `test_schema.py::test_wrong_key_reports_key_schema_error` (`summary_parsed=True`, exit 1). The target test stayed red, and `test_dict`, which passed at baseline, went red as well. **Attempt 1's fix is therefore a red result, not an unknown.** The Reviewer approved it by design without seeing test results; the Tester is what caught it. Its diff also carried one stray trailing space (`else: `), the same kind of artefact F6 recorded.
+- **Attempt 2**, the retry, carried `evidence_kind: tester_failure`. Its prompt was **57,402 characters** against 37,732 for attempt 1, because it carried the failure evidence. The Implementer call ended with `stop_reason: MAX_TOKENS`: **8,253 thinking + 7,731 output = 15,984 tokens against the 16,000 limit.** The output was cut off at 7,731, short of the ~9.8k a full rewrite of the file takes, so no edits came back and the run ended on `LLMTruncatedError`. The truncation was logged (the F5 change); before it, this call would have left no trace.
+- The model never produced a response to the Tester evidence, so **whether that evidence would have helped is still unmeasured.**
+
+**Numbers.** The first Implementer call in this run used 1,665 thinking and 9,788 output tokens. Under `thinking_level=LOW` the Implementer's thinking has ranged from 1,665 to 8,253 across schema calls, so `LOW` does not bound it (see F5: it is an effort setting, not a token cap). Output for a full-file rewrite has been 9,779 to 9,843 tokens across the logged schema attempts.
+
+**Change.** Implementer `MAX_TOKENS` raised from 16000 to **24000**. `thinking_level` is unchanged (`LOW`). The Planner (16000) and Reviewer are unchanged. The ceiling is set by the HTTP timeout, not the model's output limit: the client allows 120 s per attempt (`DEFAULT_TIMEOUT`), logged throughput is about 275-325 tokens/s, so 24,000 tokens is about 90 s in the worst case, while 32,000 would approach the timeout and an SDK retry would re-spend the whole call. The model's documented maximum output is 65,536 (65,535 on one Google page); that figure is not the binding constraint. A 24,000 budget leaves about 14k for thinking after a roughly 10k output. `tests/test_prompts.py` asserts the new value.
+
+**Proved.**
+- Attempt 1 was applied and failed two tests, one of them a regression.
+- Attempt 2 overran 16,000 (15,984 used, `MAX_TOKENS`) with 8,253 of it thinking.
+- The Implementer's thinking under `LOW` varied by about 5x across calls.
+- The truncated call was logged with stop reason and usage.
+
+**Unverified.**
+- **Whether 24,000 is enough.** It has not been run. A retry that thinks as long as attempt 2 did and outputs about 10k fits (about 18.3k), but nothing shows thinking cannot exceed 14k.
+- Whether 24,000 stays inside the 120 s timeout in practice: the ~90 s figure is arithmetic on two logged calls, not a measured 24k-token call.
+- Whether `MINIMAL` would cut Implementer thinking, and what it would do to retry quality. Not changed here on purpose: one data point, and changing the level and the budget together would confound the next run (the same caution as F6).
+- Whether the retry, once it can respond, uses the Tester evidence well.
 
 ### Phase 5, complete as recorded
 
