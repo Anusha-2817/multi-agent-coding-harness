@@ -27,9 +27,10 @@ from google.genai import errors as genai_errors
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from harness.agents.planner import MAX_TOKENS as PLANNER_MAX_TOKENS
-from harness.agents.planner import THINKING_BUDGET as PLANNER_THINKING_BUDGET
+from harness.agents.planner import THINKING_LEVEL as PLANNER_THINKING_LEVEL
 from harness.agents.planner import Planner
 from harness.events import EventLog
+from harness.state import TaskState
 from harness.llm import (
     DEFAULT_MODEL,
     RETRYABLE_STATUS,
@@ -404,16 +405,19 @@ class TestStopReasonsThatAreNotRepaired:
 
         assert "thinking" in str(caught.value)
 
-    def test_a_thinking_budget_is_sent_as_a_thinking_config(self, client):
+    def test_a_thinking_level_is_sent_and_never_with_a_budget(self, client):
         sdk = with_sdk(client, envelope('{"name": "a", "count": 1}'))
 
         client.complete_structured(
-            system="s", user="u", schema=Shape, max_tokens=100, thinking_budget=40
+            system="s", user="u", schema=Shape, max_tokens=100, thinking_level="LOW"
         )
 
-        assert sdk.calls[0]["config"].thinking_config.thinking_budget == 40
+        thinking = sdk.calls[0]["config"].thinking_config
+        assert thinking.thinking_level == "LOW"
+        # Combining the two is a 400 on the 3.x models.
+        assert thinking.thinking_budget is None
 
-    def test_no_thinking_budget_leaves_thinking_config_unset(self, client):
+    def test_no_thinking_level_leaves_thinking_config_unset(self, client):
         sdk = with_sdk(client, envelope('{"name": "a", "count": 1}'))
 
         client.complete_structured(system="s", user="u", schema=Shape, max_tokens=100)
@@ -443,9 +447,60 @@ class TestStopReasonsThatAreNotRepaired:
         assert len(sdk.calls) == 1
         config = sdk.calls[0]["config"]
         assert config.max_output_tokens == PLANNER_MAX_TOKENS
-        assert config.thinking_config.thinking_budget == PLANNER_THINKING_BUDGET
-        # The point of the cap: room is left for the plan after thinking is spent.
-        assert PLANNER_THINKING_BUDGET < PLANNER_MAX_TOKENS
+        assert config.thinking_config.thinking_level == PLANNER_THINKING_LEVEL == "LOW"
+        assert config.thinking_config.thinking_budget is None
+
+    def test_a_truncated_call_carries_its_stop_reason_and_token_counts(self, client):
+        usage = usage_metadata(
+            prompt_token_count=900, candidates_token_count=0, thoughts_token_count=7990
+        )
+        with_sdk(
+            client,
+            envelope(finish_reason="MAX_TOKENS", parts=[thought_part()], usage=usage),
+        )
+
+        with pytest.raises(LLMTruncatedError) as caught:
+            client.complete_structured(system="s", user="u", schema=Shape, max_tokens=10)
+
+        payload = caught.value.call_payload
+        assert payload["stop_reason"] == "MAX_TOKENS"
+        assert payload["parse_attempts"] == 1
+        assert payload["usage"]["output_tokens"] == 0
+        assert payload["usage"]["thinking_tokens"] == 7990
+
+    def test_a_truncated_planner_call_still_logs_llm_response_before_raising(
+        self, client, tmp_path
+    ):
+        """The gap this closes: a truncated call used to leave `llm_request` as
+        the last line of the log, with the stop reason and the thinking spend
+        unrecorded."""
+        (tmp_path / "repo").mkdir()
+        (tmp_path / "repo" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+        usage = usage_metadata(
+            prompt_token_count=900, candidates_token_count=0, thoughts_token_count=7990
+        )
+        with_sdk(
+            client,
+            envelope(finish_reason="MAX_TOKENS", parts=[thought_part()], usage=usage),
+        )
+        log = EventLog("trunc_log_test", log_dir=tmp_path / "logs")
+        state = TaskState(
+            task_id="trunc_log_test",
+            repo_path=str(tmp_path / "repo"),
+            task_description="d",
+            failure_input="f",
+        )
+
+        with pytest.raises(LLMTruncatedError):
+            Planner(log, client).run(state)
+
+        events = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
+        assert [e["event"] for e in events] == ["llm_request", "llm_response"]
+        response = events[-1]
+        assert response["agent"] == "planner"
+        assert response["payload"]["stop_reason"] == "MAX_TOKENS"
+        assert response["payload"]["usage"]["thinking_tokens"] == 7990
+        assert response["payload"]["usage"]["output_tokens"] == 0
 
     @pytest.mark.parametrize(
         "finish_reason", ["SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"]

@@ -179,7 +179,16 @@ class LLMTruncatedError(LLMResponseError):
     on by default and thinking tokens come out of the same budget. A `MAX_TOKENS`
     finish with *no* text at all usually means the whole budget went on thinking,
     and the fix is the same one: raise `max_tokens`.
+
+    `call_payload` is what an `LLMResult` would have logged for this call
+    (`model`, `stop_reason`, `parse_attempts`, `usage`), set by
+    `complete_structured`. It exists because a truncated call returns no
+    `LLMResult` and this module cannot log, so without it the one call that
+    most needs its token counts recorded would leave no trace. `Agent.run`
+    writes it as the `llm_response` event before the error propagates.
     """
+
+    call_payload: dict[str, Any] | None = None
 
 
 class LLMRefusalError(LLMResponseError):
@@ -386,7 +395,7 @@ class LLMClient:
         user: str,
         schema: type[BaseModel],
         max_tokens: int,
-        thinking_budget: int | None = None,
+        thinking_level: str | None = None,
     ) -> LLMResult:
         """Ask for one object of `schema`'s shape, and return it validated.
 
@@ -395,9 +404,10 @@ class LLMClient:
         of a bare list wraps it in a one-field envelope -- see
         `implementer.ImplementerResponse`.
 
-        `thinking_budget` caps thinking tokens within `max_tokens`. `None` leaves
-        thinking to the model's dynamic default, which is what every caller but
-        the Planner still gets.
+        `thinking_level` (`"MINIMAL"`, `"LOW"`, `"MEDIUM"` or `"HIGH"`) sets how
+        much the model thinks. It is an effort setting, not a token cap:
+        `max_tokens` remains the only hard ceiling. `None` leaves thinking to
+        the model's default, which is what the Reviewer still gets.
         """
         json_schema = schema.model_json_schema()
         messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
@@ -408,12 +418,16 @@ class LLMClient:
                 messages=messages,
                 json_schema=json_schema,
                 max_tokens=max_tokens,
-                thinking_budget=thinking_budget,
+                thinking_level=thinking_level,
             )
             # Outside the try below, and that placement is the whole mechanism:
             # a truncation or a refusal raises straight past the repair loop,
             # because neither is repairable by asking again more politely.
-            text = self._text_of(envelope)
+            try:
+                text = self._text_of(envelope)
+            except LLMTruncatedError as exc:
+                exc.call_payload = {**self._metadata_of(envelope), "parse_attempts": parse_attempt}
+                raise
 
             try:
                 value = _validate(text, schema)
@@ -449,7 +463,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         json_schema: dict[str, Any],
         max_tokens: int,
-        thinking_budget: int | None = None,
+        thinking_level: str | None = None,
     ) -> Any:
         """One API call, with SDK exceptions mapped onto this module's two.
 
@@ -468,16 +482,17 @@ class LLMClient:
         still fails validation and still gets named back to the model.
 
         `thinking_config` is left unset unless the caller passes
-        `thinking_budget`: thinking is dynamic by default, and only a caller that
-        has seen it consume the whole output budget names a ceiling.
+        `thinking_level`, and only `thinking_level` is ever sent: the API returns
+        a 400 if it is combined with the legacy `thinking_budget`, so the budget
+        is not offered at all.
         `temperature` and its relatives are not sent at all -- prompting is the
         steering mechanism here, and a sampling knob would be one more thing to
         keep aligned across two agents.
         """
         config_fields: dict[str, Any] = {}
-        if thinking_budget is not None:
+        if thinking_level is not None:
             config_fields["thinking_config"] = genai_types.ThinkingConfig(
-                thinking_budget=thinking_budget
+                thinking_level=thinking_level
             )
         try:
             return self._sdk.models.generate_content(

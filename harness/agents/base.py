@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from harness.events import EventLog
+from harness.llm import LLMTruncatedError
 from harness.state import TaskState
 
 
@@ -153,7 +154,15 @@ class Agent(ABC):
         inputs = self._collect(state, contract)# pulls ONLY requires + optional from state
         self._check_signature(inputs)
 
-        value = self._run(**inputs)# passes ONLY those fields to _run
+        try:
+            value = self._run(**inputs)# passes ONLY those fields to _run
+        except LLMTruncatedError as exc:
+            # A truncated call returns no `LLMResult`, so the agent never reaches
+            # its own `llm_response` log line. Write it here, then let the error
+            # propagate unchanged: the run still ends in a stack trace.
+            if exc.call_payload is not None:
+                self.log(event="llm_response", payload=exc.call_payload)
+            raise
         if value is None:
             self._violation(
                 f"produced None for {contract.produces!r}; an agent that ran and "
