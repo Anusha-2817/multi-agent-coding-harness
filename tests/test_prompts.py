@@ -104,7 +104,7 @@ class FakeClient:
         self.value = value
         self.calls: list[dict] = []
 
-    def complete_structured(self, *, system, user, schema, max_tokens):
+    def complete_structured(self, *, system, user, schema, max_tokens, thinking_budget=None):
         self.calls.append(
             {"system": system, "user": user, "schema": schema, "max_tokens": max_tokens}
         )

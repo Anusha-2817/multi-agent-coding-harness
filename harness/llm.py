@@ -386,6 +386,7 @@ class LLMClient:
         user: str,
         schema: type[BaseModel],
         max_tokens: int,
+        thinking_budget: int | None = None,
     ) -> LLMResult:
         """Ask for one object of `schema`'s shape, and return it validated.
 
@@ -393,6 +394,10 @@ class LLMClient:
         structured outputs accepts at the root. `Plan` already is one; a producer
         of a bare list wraps it in a one-field envelope -- see
         `implementer.ImplementerResponse`.
+
+        `thinking_budget` caps thinking tokens within `max_tokens`. `None` leaves
+        thinking to the model's dynamic default, which is what every caller but
+        the Planner still gets.
         """
         json_schema = schema.model_json_schema()
         messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
@@ -403,6 +408,7 @@ class LLMClient:
                 messages=messages,
                 json_schema=json_schema,
                 max_tokens=max_tokens,
+                thinking_budget=thinking_budget,
             )
             # Outside the try below, and that placement is the whole mechanism:
             # a truncation or a refusal raises straight past the repair loop,
@@ -443,6 +449,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         json_schema: dict[str, Any],
         max_tokens: int,
+        thinking_budget: int | None = None,
     ) -> Any:
         """One API call, with SDK exceptions mapped onto this module's two.
 
@@ -460,12 +467,18 @@ class LLMClient:
         `extra="forbid"` load-bearing for the repair path -- an unexpected key
         still fails validation and still gets named back to the model.
 
-        `thinking_config` is left unset: it is dynamic by default on the 2.5
-        family, and naming it would only be a chance to name it wrong.
+        `thinking_config` is left unset unless the caller passes
+        `thinking_budget`: thinking is dynamic by default, and only a caller that
+        has seen it consume the whole output budget names a ceiling.
         `temperature` and its relatives are not sent at all -- prompting is the
         steering mechanism here, and a sampling knob would be one more thing to
         keep aligned across two agents.
         """
+        config_fields: dict[str, Any] = {}
+        if thinking_budget is not None:
+            config_fields["thinking_config"] = genai_types.ThinkingConfig(
+                thinking_budget=thinking_budget
+            )
         try:
             return self._sdk.models.generate_content(
                 model=self.model,
@@ -475,6 +488,7 @@ class LLMClient:
                     max_output_tokens=max_tokens,
                     response_mime_type="application/json",
                     response_json_schema=json_schema,
+                    **config_fields,
                 ),
             )
         except genai_errors.APIError as exc:

@@ -26,6 +26,10 @@ import pytest
 from google.genai import errors as genai_errors
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from harness.agents.planner import MAX_TOKENS as PLANNER_MAX_TOKENS
+from harness.agents.planner import THINKING_BUDGET as PLANNER_THINKING_BUDGET
+from harness.agents.planner import Planner
+from harness.events import EventLog
 from harness.llm import (
     DEFAULT_MODEL,
     RETRYABLE_STATUS,
@@ -399,6 +403,49 @@ class TestStopReasonsThatAreNotRepaired:
             client.complete_structured(system="s", user="u", schema=Shape, max_tokens=10)
 
         assert "thinking" in str(caught.value)
+
+    def test_a_thinking_budget_is_sent_as_a_thinking_config(self, client):
+        sdk = with_sdk(client, envelope('{"name": "a", "count": 1}'))
+
+        client.complete_structured(
+            system="s", user="u", schema=Shape, max_tokens=100, thinking_budget=40
+        )
+
+        assert sdk.calls[0]["config"].thinking_config.thinking_budget == 40
+
+    def test_no_thinking_budget_leaves_thinking_config_unset(self, client):
+        sdk = with_sdk(client, envelope('{"name": "a", "count": 1}'))
+
+        client.complete_structured(system="s", user="u", schema=Shape, max_tokens=100)
+
+        assert sdk.calls[0]["config"].thinking_config is None
+
+    def test_the_planner_surfaces_a_thinking_only_truncation(self, client, tmp_path):
+        """The real failure, with no API call: the Planner's whole output budget
+        goes on thinking and the response carries no text part. The error must
+        reach the caller after exactly one request -- a retry truncates
+        identically -- and the request must have carried the Planner's own
+        limits."""
+        (tmp_path / "repo").mkdir()
+        (tmp_path / "repo" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+        sdk = with_sdk(client, envelope(finish_reason="MAX_TOKENS", parts=[thought_part()]))
+        planner = Planner(EventLog("trunc_test", log_dir=tmp_path / "logs"), client)
+
+        with pytest.raises(LLMTruncatedError) as caught:
+            planner._run(
+                repo_path=str(tmp_path / "repo"),
+                task_description="d",
+                failure_input="f",
+            )
+
+        assert caught.value.raw_text == ""
+        assert "thinking" in str(caught.value)
+        assert len(sdk.calls) == 1
+        config = sdk.calls[0]["config"]
+        assert config.max_output_tokens == PLANNER_MAX_TOKENS
+        assert config.thinking_config.thinking_budget == PLANNER_THINKING_BUDGET
+        # The point of the cap: room is left for the plan after thinking is spent.
+        assert PLANNER_THINKING_BUDGET < PLANNER_MAX_TOKENS
 
     @pytest.mark.parametrize(
         "finish_reason", ["SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"]

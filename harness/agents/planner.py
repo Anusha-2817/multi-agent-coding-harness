@@ -20,8 +20,16 @@ from harness.state import Plan
 from harness.workspace import list_repo_files, read_repo_file
 
 # The plan is four short lists. Thinking shares this budget, which is what the
-# headroom is for.
-MAX_TOKENS = 8000
+# headroom is for. 8000 was too little on a ~46k-character prompt: one real run
+# spent 7,680 tokens thinking (216 of output), and two others ran out entirely
+# and returned no text (`LLMTruncatedError`).
+MAX_TOKENS = 16000
+
+# A ceiling on thinking alone, so a long deliberation cannot consume the budget
+# the plan itself needs. Kept well under MAX_TOKENS; the difference is the room
+# guaranteed for the output. Above the 7,680 the one successful long-prompt run
+# used, so it does not bind on a run that worked.
+THINKING_BUDGET = 8192
 
 # A source file longer than this is listed rather than inlined. Fixture repos are
 # 5-10 small files by design, so this should never fire -- it is here so that if
@@ -164,6 +172,7 @@ class Planner(Agent):
             user=user,
             schema=Plan,
             max_tokens=MAX_TOKENS,
+            thinking_budget=THINKING_BUDGET,
         )
 
         # The call's cost and shape, not the plan. `agent_produced` from the base
