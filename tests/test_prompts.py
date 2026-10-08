@@ -529,7 +529,7 @@ class TestThinkingLevels:
         Implementer(event_log, client).run(state(repo, plan=PLAN))
 
         assert client.calls[0]["thinking_level"] == "LOW"
-        assert client.calls[0]["max_tokens"] == 16000
+        assert client.calls[0]["max_tokens"] == 24000
 
     def test_the_reviewer_leaves_thinking_at_the_default(self, repo, event_log):
         client = FakeClient(ReviewVerdict(reason="fine", approved=True, violated_constraints=[]))

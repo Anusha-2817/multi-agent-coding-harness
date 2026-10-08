@@ -36,10 +36,14 @@ from harness.state import Evidence, FileEdit, Plan, ReviewerRejection, TesterFai
 from harness.workspace import read_repo_file
 
 # Whole files, not hunks -- and thinking shares the budget. Generous because a
-# truncated response is an `LLMTruncatedError`, not a smaller edit. Staying under
-# ~16k also keeps a non-streaming request clear of HTTP timeouts, which is a
-# reason to keep fixture files small rather than to reach for streaming.
-MAX_TOKENS = 16000
+# truncated response is an `LLMTruncatedError`, not a smaller edit. A ~38k-char
+# file is ~9.8k tokens of output, and one retry on it thought for 8,253 tokens
+# even at LOW, which overran the old 16,000. The ceiling is bounded above by the
+# HTTP timeout (120 s per attempt, DEFAULT_TIMEOUT in llm.py), not by the model's
+# 65,535 output limit: logged throughput is ~275-325 tokens/s, so 24,000 is
+# ~90 s worst case, while 32,000 would approach the timeout and an SDK retry
+# would re-spend the whole call.
+MAX_TOKENS = 24000
 
 # Thinking effort. The output is the whole file again, which on a ~38k-character
 # file is most of MAX_TOKENS, so thinking left at the default can crowd it out.
