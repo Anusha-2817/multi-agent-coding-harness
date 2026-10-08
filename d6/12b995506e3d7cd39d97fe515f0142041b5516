@@ -1,0 +1,68 @@
+harness/agents/implementer.py
+  s_fa8aab5a2f2901::t_5d8e0b21d7f39d 39-46
+tests/test_prompts.py
+  s_fa8aab5a2f2901::t_5d8e0b21d7f39d 532
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "d612b995506e3d7cd39d97fe515f0142041b5516",
+  "branch": "main",
+  "prompts": {
+    "s_fa8aab5a2f2901": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ee1e3431-2bdc-4b18-9806-ac71c77f6832",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:a6821fe167557c573274a2cb34923f6d7e1f09aa9ac20261127ea3d2f7d9a27a",
+      "total_additions": 35,
+      "total_deletions": 5,
+      "accepted_lines": 2861,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_fa8aab5a2f2901": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ee1e3431-2bdc-4b18-9806-ac71c77f6832",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:a6821fe167557c573274a2cb34923f6d7e1f09aa9ac20261127ea3d2f7d9a27a",
+      "stats": {
+        "total_additions": 35,
+        "total_deletions": 5,
+        "accepted_lines": 2861,
+        "overriden_lines": 0,
+        "files": {
+          "CLAUDE.md": {
+            "total_additions": 26,
+            "total_deletions": 0,
+            "accepted_lines": 2110,
+            "overriden_lines": 0
+          },
+          "harness/agents/implementer.py": {
+            "total_additions": 8,
+            "total_deletions": 4,
+            "accepted_lines": 8,
+            "overriden_lines": 0
+          },
+          "tests/test_prompts.py": {
+            "total_additions": 1,
+            "total_deletions": 1,
+            "accepted_lines": 743,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
