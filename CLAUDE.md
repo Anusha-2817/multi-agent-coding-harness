@@ -1919,6 +1919,74 @@ Branches: *incomplete* (one list only, or an `s?`-less pattern: each leaves exac
 .venv\Scripts\python.exe cli.py --repo ..\experiments\inflection
 ```
 
+### F5 — thinking tokens exhausted `max_tokens` on a larger real repo (schema)
+
+**What happened.** On `experiments/schema` (a 46k-character Planner prompt, a ~970-line target file), the Planner and then the Implementer raised `LLMTruncatedError`: thinking used the whole output budget and no text came back. The Planner had `MAX_TOKENS = 8000`. The Implementer had 16000 and no thinking control. In the one Planner run that got through at the default level, thinking used 7,680 of the 8,000 tokens (`schema_20261008T104322Z`). The logs of the failed calls show only an `llm_request` and no response, because truncated calls were not logged at the time (see the fix below).
+
+**The wrong first fix.** The Planner's `MAX_TOKENS` was raised to 16000 and `thinking_budget = 8192` was added. A later run (`schema_20261008T110638Z`) logged **15,358 thinking tokens** against that cap, so the budget was not honored. That call escaped truncation by only about 400 tokens (16,000 − 15,358 − 228 output). A successful response never proved the cap worked, and it was the log's token counts, not the success, that showed it did not. The logs do not record the thinking config sent, so that this run carried the budget rests on the order of the changes, not on a logged field.
+
+**What the SDK and docs showed.** The installed SDK (google-genai 2.19.0) offers both `thinking_budget` and `thinking_level` on `ThinkingConfig`. The documented control for gemini-3.5-flash is `thinking_level` (`minimal`, `low`, `medium`, `high`), with `medium` as the default. `thinking_budget` is kept only for backward compatibility, and sending both in one request returns a 400. Whether the budget is a hard cap or a hint is not documented; treat it as a hint. `max_output_tokens` is the only documented hard ceiling and includes thinking.
+
+**The fix.** `thinking_budget` was removed. `complete_structured` and `_create` take an optional `thinking_level` (default `None`, sent only when set). The Planner and the Implementer send `thinking_level="LOW"`, and `MAX_TOKENS` stays at 16000 as the only hard ceiling. The Reviewer is unchanged and still runs at the default level. Truncated calls now log an `llm_response` event with stop reason and token usage: `llm.py` attaches the payload to `LLMTruncatedError.call_payload` and `Agent.run` in `base.py` writes the event before re-raising, so the client reports and the agent logs, as before.
+
+**Result.** In `schema_20261008T114630Z` the Planner's thinking dropped to 5,532 tokens, and no call truncated (every stop reason `STOP`). Implementer thinking plus output stayed between about 12.1k and 13.5k, under 16,000 (per-attempt figures are in F6).
+
+**Evidence boundaries.** The log proves `LOW` lowered thinking on this prompt and that nothing truncated afterwards. It does not show how `LOW` affects plan or code quality.
+
+**Open items.**
+- The Reviewer's thinking is not capped.
+- The 487 tests check that the right settings are sent, not that `LOW` reduces thinking. Only live runs show that.
+
+**Interview line.** A real repo broke a limit the fixtures never reached. The harness stopped safely with a clear error, and the logging gap was found and fixed.
+
+### F6 — schema round-2 run: five of five attempts rejected, on corruptions the plan never asked for
+
+`transcripts/schema_20261008T114630Z.jsonl`. **`escalated_retry_limit`, 5 of 5 attempts, every attempt rejected by the Reviewer, nothing reached disk.** The plan was correct and targeted `schema/__init__.py`. This is the run `Predictions, written before any run` listed under *schema* as "escalation (cap, livelock) or Reviewer-stuck", with the cause not predicted: that section expected the failure to come from the fix being incomplete, not from collateral damage around a fix that was roughly right.
+
+**The plan.** Four steps: a `key_errors` dict before the `data_items` loop, record the caught `SchemaError` per key instead of `pass`, gather `autos`/`errors` for `wrong_keys` when raising `SchemaWrongKeyError`, and filter out `None`. Constraints: only `schema/__init__.py`; `SchemaWrongKeyError` still raised; default message preserved when no custom error exists. No wrong-file or wrong-function branch occurred.
+
+#### The five corruptions, from the logged diffs and Reviewer reasons
+
+Attempt 4's ledger line was cut off, so its detail is read from the log's `diff_rendered` and Reviewer verdict, not from the ledger.
+
+1. **Attempt 1:** the `defaults = (...)` expression rewritten as an invented `... hasattr(k, "defaulttrim")) if False else ...` ternary. Nothing in the plan or the file suggests it.
+2. **Attempt 2:** `super().__init__(` became `super().__init密(` (a stray CJK character, a syntax error that would crash the package), plus `else:` → `else: ` (trailing space) and an unrequested re-wrapping of a `raise ValueError(...)`.
+3. **Attempt 3:** `Regex.validate` edited to wrap `error_message` in lists in two places (an unrequested semantic change in a different class), plus trailing whitespace on `self, ` / `-> None: ` / `else: ` in several signatures.
+4. **Attempt 4:** the opening `"""` of `Use.__call__`'s docstring became `""` (syntax error), and the JSON-schema regex `r"\(\?P<[a-z\d_]+>"` became `r"<TAB>P<[a-z\d_]+>"` (`\(\?` replaced by a tab character).
+5. **Attempt 5:** the same regex changed to `r"\(\?P<[a-z\df_]+>)"` (an `f` inserted and a stray `)`), plus trailing whitespace on `self, ` in five signatures.
+
+In every attempt the intended `key_errors` change was present and looked plausible. The attempts differ in design (list-of-errors vs one error per key, whether `message` is included in `autos`), so the Implementer was not stuck on one idea. **None of the five fixes was ever applied or run, so whether any of them was correct is unknown.**
+
+#### Numbers (taken from the log)
+
+| call | thinking | output | thinking + output |
+| --- | --- | --- | --- |
+| Planner | 5,532 | 300 | 5,832 |
+| Implementer 1 | 2,590 | 9,843 | 12,433 |
+| Implementer 2 | 2,946 | 9,779 | 12,725 |
+| Implementer 3 | 3,707 | 9,788 | 13,495 |
+| Implementer 4 | 2,269 | 9,822 | 12,091 |
+| Implementer 5 | 3,026 | 9,819 | 12,845 |
+| Reviewer 1-5 (thinking) | 1,155 / 915 / 2,322 / 1,553 / 1,997 | not tabulated here (99 and 124 on attempts 1-2) | n/a |
+
+Every stop reason was `STOP`. Thinking plus output never exceeded 13,495 against the 16,000 `MAX_TOKENS`, so **truncation was not the cause.** The thinking-limit history that led to this configuration is F5.
+
+#### What the log proves, and what it cannot
+
+- **Proved:** the plan came out correct under `LOW`; the Implementer's full-file output fit (about 9.8k tokens) in every attempt; the Reviewer rejected on real defects each time.
+- **Hypothesis, unconfirmed:** emitting a complete replacement of a ~970-line file produces random copy errors somewhere in the 970 lines that the model was not editing. The pattern fits: corruption sits in places unrelated to the fix and differs each attempt.
+- **Not separable from this log:** `LOW` thinking may have contributed (less deliberation per attempt). The Implementer was set to `LOW` in the same change that produced this run (F5), and there is no medium-level Implementer run on this file to compare against: the earlier schema Implementer calls never returned a response.
+
+#### What worked
+
+- **The Reviewer caught 5 of 5.** Each rejection named a concrete defect and each was correct against the diff.
+- **Nothing reached disk.** No approval gate or apply event appears; the clone's only change is the original injected bug.
+- **The livelock detector correctly stayed quiet.** The five rendered diffs are pairwise different, and byte-equality is the rule it implements.
+
+#### Candidate next step — not built, not decided
+
+**A diff-based or hunk-based Implementer**: have the model emit only the changed region (search/replace blocks or hunks) and let the harness apply them, so unrelated lines cannot be re-typed. Costs to weigh before choosing it: it reverses the ruling in "Edits, not patches" (which chose full replacement because models emit invalid unified diffs, so any replacement would need an exact-match anchor scheme and its own failure mode), it touches `FileEdit`, the Implementer contract and the scope/diff rendering, and it is only worth doing if the corruption is confirmed to come from full-file output. The cheaper discriminating evidence is a second run on this repo with the Implementer back at the default thinking level, or a run on a smaller file: either would separate "full-file output" from "LOW".
+
 ### Phase 5, complete as recorded
 
 **All three probe passes are complete.** The Reviewer probe scored **8/8**, the Implementer probe **5/5**, and the conditional end-to-end `fixture_repo_3` run went green on attempt 1. Both halves of retry-on-failure are measured directly; see "What the retry mechanism proved, together".
