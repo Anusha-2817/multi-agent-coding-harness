@@ -1,0 +1,15 @@
+pyproject.toml
+  h_14a5587cb86879 1-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "2eb59f9ffd7e6f740d9a7364905983c059637743",
+  "branch": "main",
+  "prompts": {},
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  }
+}
