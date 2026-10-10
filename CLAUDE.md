@@ -2012,6 +2012,55 @@ Every stop reason was `STOP`. Thinking plus output never exceeded 13,495 against
 - Whether 24,000 stays inside the 120 s timeout in practice: the ~90 s figure is arithmetic on two logged calls, not a measured 24k-token call.
 - Whether `MINIMAL` would cut Implementer thinking, and what it would do to retry quality. Not changed here on purpose: one data point, and changing the level and the budget together would confound the next run (the same caution as F6).
 - Whether the retry, once it can respond, uses the Tester evidence well.
+- A later run exercised 24,000 and the retry recovered (20,139 tokens used), and logged a different model name than requested; see F8.
+
+### F8 — schema: the first retry on a real repo that recovered, and a model-name discrepancy
+
+`transcripts/schema_20261010T042800Z.jsonl`. **`succeeded`, 2 of 5 attempts, `reason: the suite is green.`**
+
+**What happened.**
+- **Attempt 1** was approved by the Reviewer and **applied**. The Tester failed it: `test_schema.py::test_dict` and `test_schema.py::test_wrong_key_reports_key_schema_error` (the same two nodeids as F7's attempt 1). Its diff added a `key_errors` dict, recorded every `SchemaError` per key, and always passed `autos`/`errors` from all rejecting key schemas into `SchemaWrongKeyError`, with no check for whether a key schema carried a custom error.
+- **Attempt 2** carried `evidence_kind: tester_failure` (57,220 characters against 37,836 for attempt 1), produced a response, was approved, applied, and the Tester returned green. Its diff added a `_has_custom_error` helper (checks `_error`, recursing through `_schema`), kept key errors as `(key, skey, err)` tuples, and raised with the key errors' `autos`/`errors` only when the rejecting key schema carries a custom error (or an error text is non-`None`). Otherwise the original default message is raised.
+- This is the **retry path recovering on a real model and a real repo from a Tester failure**: the 57k-character evidence prompt that truncated in F7 was answered, and the answer fixed the suite.
+
+**Numbers (from the log).**
+
+| call | thinking | output | notes |
+| --- | --- | --- | --- |
+| Planner | not logged | 278 | |
+| Implementer, attempt 1 | not logged | 9,737 | |
+| Reviewer, attempt 1 | 976 | 156 | |
+| Implementer, attempt 2 | 10,207 | 9,932 | 20,139 total, `STOP` |
+| Reviewer, attempt 2 | 1,133 | 150 | |
+
+Attempt 2's 20,139 tokens is **under the 24,000 ceiling set in F7 and over the old 16,000**, so at the old limit this call would have truncated, as the F7 call did. "Not logged" means the response carried no `thoughts_token_count`; it is absent, not recorded as zero.
+
+**Model discrepancy: the log reports `gemini-3.6-flash`, not the requested model.**
+- `DEFAULT_MODEL` is `gemini-3.5-flash`, and neither `cli.py` nor the agents pass a model, so the request names 3.5 (read from the code; the request's model name is not itself logged).
+- The logged name is the response's `model_version`, falling back to `self.model` (`harness/llm.py:536`). Every `llm_response` in this run says `gemini-3.6-flash`. The 2026-10-08 logs (`schema_20261008T104322Z`, `...110638Z`) said `gemini-3.5-flash`.
+- **The cause is unverified.** Nothing in this repo explains it, and it is not established whether the API served a different model than the one requested or reports a different name for the same one.
+- **Consequence, stated plainly: the F5-F7 numbers and this run are not like-for-like.** Thinking and output figures from 2026-10-08 are from the model the log named 3.5; this run's are from what the log names 3.6. Treat the `LOW` thinking range in F7 (1,665 to 8,253) and this run's 10,207 as possibly different populations. The 3.6 label also appears on the earlier python-slugify runs in this file, which is not evidence about this run's cause.
+
+**Compared with upstream fix `15158c539`** (read-only: `git show` in `experiments/schema`, whose `HEAD` is that commit).
+- **Upstream** stores `x.code` per key, only when the rejecting key schema has `_error is not None`, and raises `SchemaWrongKeyError(message, [e.format(data) or None] + custom_errors)`, so the default message stays in `autos` and the custom text is appended to `errors`.
+- **The green diff** differs in four ways: it keeps a list of `(key, skey, err)` tuples instead of a dict, recursing through `_schema` for custom errors instead of checking only the top-level `_error`; it passes the key errors' `autos` and `errors` through unchanged; when a custom error is found it replaces the default `message` in `autos` instead of keeping it; and its condition also fires whenever any key error text is non-`None`.
+- **A scratch probe** (copies of both versions; my own inputs, not upstream tests) shows the displayed `code` is the same on the suite's three scenarios and on the default case, and differs in two I tried:
+  - with an outer `Schema(..., error="outer: {}")` and no custom error on the key, the green version adds a second line (`outer: zz`) that upstream does not;
+  - with a nested custom error (`And(And(..., error="deep"), len)`) the green version surfaces `deep`, where upstream gives the default wrong-key message.
+
+  The first is a behaviour difference from upstream that the suite does not cover; whether it is a defect depends on intent, and I have not judged that.
+
+**Proved.**
+- The retry recovered from a Tester failure and the suite went green on attempt 2.
+- 24,000 was enough on this run (20,139 used, `STOP`), and 16,000 would not have been.
+- The two attempts' diffs are structurally different, and the second is not upstream's fix.
+- A difference from upstream exists in the outer-`error=` case, on my probe input.
+
+**Unverified.**
+- That 24,000 is enough in general: this is one call, and thinking has ranged from about 1.7k to 10.2k.
+- Correctness beyond the suite: green is the suite passing, and the probe above shows behaviour the suite does not pin.
+- The cause of the 3.5 / 3.6 model-name difference, and whether the model served actually changed.
+- Whether the green result comes from the retry evidence rather than from run-to-run variation: attempt 1 here repeated F7's failure shape, but with one recovered run and one truncated run there is no basis for a rate.
 
 ### Phase 5, complete as recorded
 
