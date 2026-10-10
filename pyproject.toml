@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mach"
+version = "0.1.0"
+description = "Framework-free 4-agent coding harness"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-genai>=2.19",
+    "pydantic>=2.13",
+    "pytest>=9.1",
+]
+
+[project.scripts]
+mach = "cli:main"
+
+[tool.setuptools]
+py-modules = ["cli"]
+
+[tool.setuptools.packages.find]
+include = ["harness*"]
