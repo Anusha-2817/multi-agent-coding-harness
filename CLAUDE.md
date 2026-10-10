@@ -2060,7 +2060,53 @@ Attempt 2's 20,139 tokens is **under the 24,000 ceiling set in F7 and over the o
 - That 24,000 is enough in general: this is one call, and thinking has ranged from about 1.7k to 10.2k.
 - Correctness beyond the suite: green is the suite passing, and the probe above shows behaviour the suite does not pin.
 - The cause of the 3.5 / 3.6 model-name difference, and whether the model served actually changed.
-- Whether the green result comes from the retry evidence rather than from run-to-run variation: attempt 1 here repeated F7's failure shape, but with one recovered run and one truncated run there is no basis for a rate.
+- Whether the green result comes from the retry evidence rather than from run-to-run variation: attempt 1 here repeated F7's failure shape, but with one recovered run and one truncated run there is no basis for a rate. (A second recovered run is recorded below.)
+
+#### Second data point: `schema_20261010T092053Z`
+
+`transcripts/schema_20261010T092053Z.jsonl`. **`succeeded`, 2 of 5 attempts, `reason: the suite is green.`** This is a second run of the same repo and configuration as the first F8 run, not a new finding.
+
+**What happened.** The same shape as the first run. Attempt 1 was approved and applied, then failed the Tester with the **same two nodeids** (`test_schema.py::test_dict`, `test_schema.py::test_wrong_key_reports_key_schema_error`). That is the third schema run in a row (F7, F8 run 1, this one) whose attempt 1 failed those two. Attempt 1 appended every caught `SchemaError` to one list and raised with all of their `autos`/`errors` whenever the list was non-empty. Attempt 2 (`evidence_kind: tester_failure`) kept the list but appended only when the error carried a custom message (`x.errors` non-`None`, or a `_error` on the key schema or on its `_schema`), then raised with the collected `autos`/`errors` and, unlike the first run's green diff, **without** `message` or `e.format(data)`. It was approved, applied, and the Tester returned green.
+
+**Numbers (from the log).** The model reported was `gemini-3.6-flash` on every call, so this run is like-for-like with the first F8 run and not with F5-F7.
+
+| call | thinking | output | notes |
+| --- | --- | --- | --- |
+| Planner | not logged | 305 | |
+| Implementer, attempt 1 | 2,879 | 9,739 | 12,618 total |
+| Reviewer, attempt 1 | 966 | 213 | |
+| Implementer, attempt 2 | 6,324 | 9,789 | 16,113 total, `STOP`; prompt 57,258 characters (attempt 1: 38,032) |
+| Reviewer, attempt 2 | 781 | 207 | |
+
+Attempt 2's 16,113 tokens is **113 over the old 16,000** and under 24,000, so at the old ceiling this call would have been cut off by a margin that small. Across the three `gemini-3.6-flash` Implementer calls with a logged count, thinking was 2,879, 6,324 and 10,207.
+
+**Compared with upstream `15158c539`** (read-only; same scratch probe as the first run, eight inputs of my own, on copies, nothing in `experiments/schema` changed; its `HEAD` is the upstream commit and the clone's only modification is still the injected bug). Observed behaviour only:
+
+| input | upstream | this run's green | first run's green |
+| --- | --- | --- | --- |
+| Regex key with custom error | `code` `Invalid profile name` | same | same |
+| `And` key with custom error | `must be upper` | same | same |
+| Regex key, no custom error | default message | same | same |
+| plain `str` key, no custom error | default message | same | same |
+| two wrong keys, custom error | `must be upper` | same `code` | same `code` |
+| outer `error="outer: {}"`, no key custom | `outer: {'a': 1, 'zz': 2}` | `outer: zz` | `outer: {'a': 1, 'zz': 2}` + `outer: zz` |
+| outer `error=`, key custom | `outer: {'FOO': 1, 'bar': 2}` / `outer: bar` / `must be upper` | `outer: bar` / `must be upper` | same three lines as upstream |
+| nested custom (`And(And(..., error="deep"), len)`) | default wrong-key message | `deep` | `deep` |
+
+Beyond `code`, this run's green also differs from upstream in the exception's fields: `autos` has 2, 1, 2, 1, 1, 2, 3 and 4 entries on the eight probe inputs (Regex custom, Regex default, `And` custom, plain `str`, outer `error=`, outer plus custom, nested, two wrong keys) against upstream's 1 on every input. I have not judged any of these as defects; they are differences in what the exception carries, on inputs the suite does not cover.
+
+**Proved.**
+- The retry recovered from a Tester failure a second time, on the same repo, and the suite went green on attempt 2.
+- 24,000 was enough on this run (16,113 used, `STOP`), and 16,000 would have been exceeded by 113 tokens.
+- The two green diffs from the two runs differ from each other (the first inserts `e.format(data)`, this one does not) and neither equals upstream.
+- On my probe inputs, this green's outer-`error=` output differs from upstream's, and differs from the first run's green.
+
+**Unverified.**
+- That 24,000 is enough in general: this is three Implementer calls on one model label.
+- Correctness beyond the suite: green means the suite passed, and the probe shows behaviour the suite does not pin.
+- Whether attempt 1's repeated failure shape is stable or coincidence: three runs, one repo, no basis for a rate.
+- The cause of the model-name discrepancy, which is unchanged.
+- Whether recovery depends on the evidence the retry carried: two recoveries and one truncation (F7) do not separate the evidence from run-to-run variation.
 
 ### Phase 5, complete as recorded
 
