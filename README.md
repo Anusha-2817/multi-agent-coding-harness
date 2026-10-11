@@ -11,6 +11,64 @@ traps.
 
 ---
 
+## Install
+
+Requires Python 3.10 or newer.
+
+From the repo folder:
+
+    pip install .
+
+This adds a `mach` command. Check it with:
+
+    mach --help
+
+## Set your API key
+
+The agents call Gemini, so set a key in the same terminal before a real run.
+
+PowerShell:
+
+    $env:GEMINI_API_KEY = "your-key"
+
+macOS / Linux:
+
+    export GEMINI_API_KEY="your-key"
+
+## Run
+
+Point it at any repository that has a failing pytest suite:
+
+    mach --repo path/to/repo
+    mach --repo path/to/repo --description "what you want fixed"
+
+The harness runs the suite once to find the failure, then loops through
+Planner, Implementer, Reviewer and Tester. Before any change is applied to
+the working copy, you see the diff and approve it with `y` or reject it with
+`n`.
+
+To try the loop without an API key or any requests:
+
+    mach --repo path/to/repo --stub
+
+A stub run still asks for approval at the terminal, and it cannot succeed: the
+scripted agents cannot fix a bug they were never told about, so it walks every
+step and halts at the retry limit.
+
+## Output
+
+Each run writes a working copy under `runs/<task_id>/` and an event log under
+`logs/<task_id>.jsonl`, both inside the directory you run `mach` from. Your
+original repo is never modified.
+
+## Safety
+
+The target repo's tests run on your machine, in the environment where `mach`
+is installed, so the target's own dependencies must be installed there too.
+There is no sandbox. Use it only on repositories you trust.
+
+---
+
 ## Problem
 
 Most "AI coding agent" projects are either:
@@ -87,6 +145,7 @@ something fails — so the number always answers "how many diffs has this task p
 A fixed task class was chosen deliberately for v1. It isolates *harness plumbing bugs* from
 *LLM reasoning quality* — if something fails, it's far more likely a coordination bug than an
 ambiguous-requirement problem, which makes v1 much faster to prove correct.
+
 
 ## Non-negotiable invariants
 
@@ -212,7 +271,7 @@ Everything below is from saved transcripts in `transcripts/`, not from memory.
 
 ### The harness suite
 
-**432 tests, all passing, ~175s, and zero API calls.** No test needs an API key; the SDK is
+**487 tests, all passing, ~175s, and zero API calls.** No test needs an API key; the SDK is
 faked wherever it is reached for. Two `pytest.ini` files keep the harness suite and the fixture
 suites from ever collecting together — a fixture's deliberate bug is *data*, and reporting it as
 a harness failure would make the harness suite permanently red. The fixture-local ini is the
@@ -334,11 +393,7 @@ retry. Every fixture built to force one was rescued by the Planner instead.
 
 ## Running it
 
-```
-python cli.py --repo tasks/fixture_repo_1 [--description "<text>"] [--stub]
-```
-
-Points `--repo` at any directory on disk and the harness runs the suite itself to find the
+The `mach --repo ...` form is under "Run" at the top. It points `--repo` at any directory on disk and the harness runs the suite itself to find the
 failing test — no `task.json` needed. `--failure "<verbatim pytest output>"` overrides discovery
 under `--repo`. The original form still works, and is what the three built fixtures use:
 
