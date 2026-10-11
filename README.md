@@ -245,7 +245,7 @@ price of not stubbing the Tester.
 | Language | Python 3.14, no agent framework |
 | State | Pydantic v2 (`TaskState`) |
 | LLM transport | Official `google-genai` SDK |
-| Model | `llm.DEFAULT_MODEL` — `gemini-3.5-flash` today, structured JSON schema output, dynamic thinking |
+| Model | `llm.DEFAULT_MODEL` — `gemini-3.6-flash` today (Google routes `gemini-3.5-flash` requests to it), structured JSON schema output, dynamic thinking |
 | Edits | Whole-file `new_content` per `FileEdit` — not patches |
 | Diff rendering | `difflib.unified_diff` over edits + baseline, for review only |
 | Test execution | `subprocess` running `pytest`, 120s timeout, via `sys.executable -m pytest` |
