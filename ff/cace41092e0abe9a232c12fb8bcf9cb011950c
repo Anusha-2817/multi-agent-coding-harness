@@ -1,0 +1,55 @@
+README.md
+  s_fa8aab5a2f2901::t_822679816963c8 14-71,396
+  h_14a5587cb86879 149,274
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "ffcace41092e0abe9a232c12fb8bcf9cb011950c",
+  "branch": "main",
+  "prompts": {
+    "s_fa8aab5a2f2901": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ee1e3431-2bdc-4b18-9806-ac71c77f6832",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:fa85e933da8d7261e46af4d1d803d239b66bcd06193b48483f40404edbab91af",
+      "total_additions": 59,
+      "total_deletions": 5,
+      "accepted_lines": 59,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_fa8aab5a2f2901": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ee1e3431-2bdc-4b18-9806-ac71c77f6832",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:fa85e933da8d7261e46af4d1d803d239b66bcd06193b48483f40404edbab91af",
+      "stats": {
+        "total_additions": 59,
+        "total_deletions": 5,
+        "accepted_lines": 59,
+        "overriden_lines": 0,
+        "files": {
+          "README.md": {
+            "total_additions": 59,
+            "total_deletions": 5,
+            "accepted_lines": 59,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
