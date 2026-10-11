@@ -1112,7 +1112,7 @@ A parse failure must not become an agent retry. The loop's `evidence` says *the 
 | -------------- | ----------------------------------------------------------------- |
 | Language       | Python 3.14, no agent framework                                   |
 | LLM transport  | official `google-genai` SDK — see "The one dependency, and where it stops" |
-| LLM model      | `llm.DEFAULT_MODEL` — `gemini-3.5-flash` today, `response_json_schema`, dynamic thinking (default) |
+| LLM model      | `llm.DEFAULT_MODEL` — `gemini-3.6-flash` today (Google routes `gemini-3.5-flash` requests to it), `response_json_schema`, dynamic thinking (default) |
 | State          | Pydantic v2                                                       |
 | Diff rendering | `difflib.unified_diff` over `edits` + baseline                    |
 | Test execution | `subprocess` running `pytest`                                     |
@@ -2035,10 +2035,11 @@ Every stop reason was `STOP`. Thinking plus output never exceeded 13,495 against
 
 Attempt 2's 20,139 tokens is **under the 24,000 ceiling set in F7 and over the old 16,000**, so at the old limit this call would have truncated, as the F7 call did. "Not logged" means the response carried no `thoughts_token_count`; it is absent, not recorded as zero.
 
-**Model discrepancy: the log reports `gemini-3.6-flash`, not the requested model.**
-- `DEFAULT_MODEL` is `gemini-3.5-flash`, and neither `cli.py` nor the agents pass a model, so the request names 3.5 (read from the code; the request's model name is not itself logged).
+**Model discrepancy: the log reports `gemini-3.6-flash`, not the requested model. Explained by Google's routing, see below.**
+- At the time of the run `DEFAULT_MODEL` was `gemini-3.5-flash`, and neither `cli.py` nor the agents pass a model, so the request named 3.5 (read from the code; the request's model name is not itself logged).
 - The logged name is the response's `model_version`, falling back to `self.model` (`harness/llm.py:536`). Every `llm_response` in this run says `gemini-3.6-flash`. The 2026-10-08 logs (`schema_20261008T104322Z`, `...110638Z`) said `gemini-3.5-flash`.
-- **The cause is unverified.** Nothing in this repo explains it, and it is not established whether the API served a different model than the one requested or reports a different name for the same one.
+- **Cause: Google's deprecation notice.** Google's deprecations page says requests to `gemini-3.5-flash` are automatically routed to `gemini-3.6-flash`; the notice is dated 2026-10-10 as reported to me. The page I fetched (2026-10-11) shows that routing statement, 3.5 Flash's release date (2026-05-19) and "no shutdown date announced", but no date next to the routing statement. The log order is consistent with it (2026-10-08 runs labelled 3.5, 2026-10-10 runs labelled 3.6), but this repo cannot observe the routing itself, so that fit is an inference from timing, not a measurement.
+- **Change:** `DEFAULT_MODEL` is now `gemini-3.6-flash`, so the request names the model that is served. F5-F7 stay labelled 3.5, because that is what their logs report.
 - **Consequence, stated plainly: the F5-F7 numbers and this run are not like-for-like.** Thinking and output figures from 2026-10-08 are from the model the log named 3.5; this run's are from what the log names 3.6. Treat the `LOW` thinking range in F7 (1,665 to 8,253) and this run's 10,207 as possibly different populations. The 3.6 label also appears on the earlier python-slugify runs in this file, which is not evidence about this run's cause.
 
 **Compared with upstream fix `15158c539`** (read-only: `git show` in `experiments/schema`, whose `HEAD` is that commit).
@@ -2059,7 +2060,7 @@ Attempt 2's 20,139 tokens is **under the 24,000 ceiling set in F7 and over the o
 **Unverified.**
 - That 24,000 is enough in general: this is one call, and thinking has ranged from about 1.7k to 10.2k.
 - Correctness beyond the suite: green is the suite passing, and the probe above shows behaviour the suite does not pin.
-- The cause of the 3.5 / 3.6 model-name difference, and whether the model served actually changed.
+- Whether 3.5 and 3.6 behave alike on this task. Google's notice explains the label, not the behaviour; the thinking and output figures in F5-F7 and F8 may still come from different populations.
 - Whether the green result comes from the retry evidence rather than from run-to-run variation: attempt 1 here repeated F7's failure shape, but with one recovered run and one truncated run there is no basis for a rate. (A second recovered run is recorded below.)
 
 #### Second data point: `schema_20261010T092053Z`
@@ -2105,7 +2106,7 @@ Beyond `code`, this run's green also differs from upstream in the exception's fi
 - That 24,000 is enough in general: this is three Implementer calls on one model label.
 - Correctness beyond the suite: green means the suite passed, and the probe shows behaviour the suite does not pin.
 - Whether attempt 1's repeated failure shape is stable or coincidence: three runs, one repo, no basis for a rate.
-- The cause of the model-name discrepancy, which is unchanged.
+- The model-name discrepancy is explained by Google's routing notice (see the first F8 run); that explanation is Google's statement plus timing, not something the log shows.
 - Whether recovery depends on the evidence the retry carried: two recoveries and one truncation (F7) do not separate the evidence from run-to-run variation.
 
 ### Phase 5, complete as recorded
