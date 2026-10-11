@@ -1,0 +1,62 @@
+baseline.py
+  s_4b4a5821e0f6d0::t_7b27029068d617 1-265
+tests/test_baseline.py
+  s_4b4a5821e0f6d0::t_5bcd13c1d8f333 1-178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "6b17a1b055a895bcfce7b0bc279d842df3133807",
+  "branch": "main",
+  "prompts": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:6cca5a0c9e31bff674338d99c2b1bb7972ffc381a647676b4a78e89e7e3b10dd",
+      "total_additions": 443,
+      "total_deletions": 0,
+      "accepted_lines": 443,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:6cca5a0c9e31bff674338d99c2b1bb7972ffc381a647676b4a78e89e7e3b10dd",
+      "stats": {
+        "total_additions": 443,
+        "total_deletions": 0,
+        "accepted_lines": 443,
+        "overriden_lines": 0,
+        "files": {
+          "baseline.py": {
+            "total_additions": 265,
+            "total_deletions": 0,
+            "accepted_lines": 265,
+            "overriden_lines": 0
+          },
+          "tests/test_baseline.py": {
+            "total_additions": 178,
+            "total_deletions": 0,
+            "accepted_lines": 178,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
