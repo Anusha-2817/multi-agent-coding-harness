@@ -1,0 +1,73 @@
+CLAUDE.md
+  s_4b4a5821e0f6d0::t_eda743197a8a0e 1127-1141
+  s_4b4a5821e0f6d0::t_7c287161e53755 2147-2164
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "c4824e5159eaab4aebc47d1d9e0e270ef6d7449f",
+  "branch": "main",
+  "prompts": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:5693caf52c6437c7473d74344c7d07b15fd5e0a6b387d4171b7f51c6a1d3de35",
+      "total_additions": 538,
+      "total_deletions": 4,
+      "accepted_lines": 2760,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:5693caf52c6437c7473d74344c7d07b15fd5e0a6b387d4171b7f51c6a1d3de35",
+      "stats": {
+        "total_additions": 538,
+        "total_deletions": 4,
+        "accepted_lines": 2760,
+        "overriden_lines": 0,
+        "files": {
+          "CLAUDE.md": {
+            "total_additions": 33,
+            "total_deletions": 0,
+            "accepted_lines": 2259,
+            "overriden_lines": 0
+          },
+          "prices.json": {
+            "total_additions": 13,
+            "total_deletions": 0,
+            "accepted_lines": 13,
+            "overriden_lines": 0
+          },
+          "scorer.py": {
+            "total_additions": 300,
+            "total_deletions": 3,
+            "accepted_lines": 297,
+            "overriden_lines": 0
+          },
+          "tests/test_scorer.py": {
+            "total_additions": 192,
+            "total_deletions": 1,
+            "accepted_lines": 191,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
