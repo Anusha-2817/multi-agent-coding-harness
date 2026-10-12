@@ -1106,6 +1106,26 @@ A parse failure must not become an agent retry. The loop's `evidence` says *the 
 
 ---
 
+## Benchmark arms
+
+Three arms, run against the same targets, so each comparison varies one thing.
+
+| Arm | What runs | Status |
+| --- | --- | --- |
+| A | `baseline.py`: one agent, no Planner, no Reviewer, auto-approve, no livelock check, no scope rules | built and tested with stubs; never run live |
+| B | `harness_arms.py --arm B`: the harness without the Reviewer (a pass-through that approves without a model call): Planner, Implementer and Tester, with C's loop, livelock check, scope rules and attempt cap | built and tested with stubs; never run live |
+| C | `harness_arms.py --arm C`: the full harness: Planner, Implementer, Reviewer, Tester | built and tested with stubs; never run live |
+
+**Held identical across all three:** the model (`llm.DEFAULT_MODEL`), the Implementer's `MAX_TOKENS` and thinking level, `MAX_ATTEMPTS`, the real Tester, a baseline reset at the top of every attempt, `.git` exclusion, and the `approve` seam, auto-approved in all three.
+
+**The Implementer prompt is identical in B and C**, including its mentions of a reviewer, so B vs C measures whether the Reviewer runs with the prompt held fixed.
+
+**What the comparisons measure.** A vs C: does the structure help at all. B vs C: does the Reviewer help.
+
+**No arm runs through `cli.py`.** The shipped CLI always stops at a human gate and must not grow a flag that skips it (see "`--stub`"). Every arm is driven by a script at the repo root, like the probes.
+
+---
+
 ## Tech stack
 
 | Part           | Choice                                                            |
