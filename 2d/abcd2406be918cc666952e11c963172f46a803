@@ -1,0 +1,73 @@
+CLAUDE.md
+  s_4b4a5821e0f6d0::t_a0bbe527931478 1109-1115,1118-1120,1123-1128
+  s_4b4a5821e0f6d0::t_0dd994b69c9245 1116-1117
+  s_4b4a5821e0f6d0::t_11caea387ade38 1121-1122
+tests/test_harness_arms.py
+  s_4b4a5821e0f6d0::t_c6f12b3ab4595f 125-130
+  s_4b4a5821e0f6d0::t_32d2c9ea149a0c 1-124,131-177
+harness_arms.py
+  s_4b4a5821e0f6d0::t_db8431fc867f8b 1-143
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "2dabcd2406be918cc666952e11c963172f46a803",
+  "branch": "main",
+  "prompts": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:44ca65c5393e747f231972094b6d34a2f62e222f42a58dde4fcd7491f3ac66da",
+      "total_additions": 345,
+      "total_deletions": 5,
+      "accepted_lines": 2546,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:44ca65c5393e747f231972094b6d34a2f62e222f42a58dde4fcd7491f3ac66da",
+      "stats": {
+        "total_additions": 345,
+        "total_deletions": 5,
+        "accepted_lines": 2546,
+        "overriden_lines": 0,
+        "files": {
+          "CLAUDE.md": {
+            "total_additions": 22,
+            "total_deletions": 2,
+            "accepted_lines": 2226,
+            "overriden_lines": 0
+          },
+          "harness_arms.py": {
+            "total_additions": 143,
+            "total_deletions": 0,
+            "accepted_lines": 143,
+            "overriden_lines": 0
+          },
+          "tests/test_harness_arms.py": {
+            "total_additions": 180,
+            "total_deletions": 3,
+            "accepted_lines": 177,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
