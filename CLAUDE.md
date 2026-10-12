@@ -1124,6 +1124,21 @@ Three arms, run against the same targets, so each comparison varies one thing.
 
 **No arm runs through `cli.py`.** The shipped CLI always stops at a human gate and must not grow a flag that skips it (see "`--stub`"). Every arm is driven by a script at the repo root, like the probes.
 
+### Task set
+
+Nine real upstream bugs, each a small fix commit that added or changed a test. Manifest (full SHAs, source files, red tests, prompt sizes): `D:/Agentic_Project1/experiments/bench/hidden/manifest.json`, outside every git repository like the other experiment clones.
+
+| Split | Tasks (repo + fix commit) |
+| --- | --- |
+| dev (3) | schema `d81871b`, xmltodict `f0322e5`, inflection `1969b3a` |
+| eval (6) | humps `2a462a7`, addict `302c8ae`, shortuuid `496cddf`, tokenize-rt `cb7836b`, cfgv `2876a67`, mccabe `0a42f06` |
+
+**What "hidden" means.** The model's copy is the buggy parent commit plus the fix commit's test files, so the failing test is **visible** — the parent alone is green, because upstream had no test for the bug yet. The upstream copy of those test files is stored in `hidden/<task>/` and **restored over the run directory before scoring**, so a run that edits a test cannot change its score. Pre-checked under the harness venv: fix commit green, task copy red only on the fix's own tests, no extra dependencies, 1–5 changed source lines.
+
+python-slugify has no task: its recent fixes have 39–58k-character repos and fail only inside subtests (F9), and its older ones keep their tests in `test.py`, which pytest does not collect.
+
+**Two caveats.** Dev prompts are much larger than eval ones — schema 48.6k and xmltodict 37.4k characters of Planner message against 6–17k for every eval task — so dev results do not predict eval cost. **cfgv `2876a67` is borderline**: its test asserts a new error message (`is not a file`), so it is partly a wording change rather than a behaviour bug.
+
 ---
 
 ## Tech stack
@@ -2128,6 +2143,24 @@ Beyond `code`, this run's green also differs from upstream in the exception's fi
 - Whether attempt 1's repeated failure shape is stable or coincidence: three runs, one repo, no basis for a rate.
 - The model-name discrepancy is explained by Google's routing notice (see the first F8 run); that explanation is Google's statement plus timing, not something the log shows.
 - Whether recovery depends on the evidence the retry carried: two recoveries and one truncation (F7) do not separate the evidence from run-to-run variation.
+
+### F9 — subtest-only failures are invisible to the Tester's summary parser
+
+Found during the task-set pre-checks, not in a run. **Status: not fixed. Gate: a run on a repo that uses `unittest` subtests.**
+
+**What happens.** pytest 9 reports a failed `self.subTest(...)` block in the short summary as `SUBFAILED(<params>) <nodeid> - ...`. `_SUMMARY_LINE` in `harness/agents/tester.py` matches only `^(?:FAILED|ERROR)\s+`, so those lines are skipped. A test that fails only inside subtests contributes no nodeid, while pytest still exits 1.
+
+**Proved** (real `Tester._run` on exported trees, raw `pytest -q` to read the lines):
+- python-slugify `548b14f` (parent source + the fix's tests): pytest reported **28 failed**; `failed_tests` was **empty**. Every failure was a `SUBFAILED` line.
+- python-semanticversion `0811fca`, same construction: **3 failed**, `failed_tests` **empty**, three `SUBFAILED` lines.
+- Mixed case, xmltodict `ab4c86f`: 5 failed, **1 named** — the one plain `FAILED` line; the four `SUBFAILED` lines were dropped.
+
+**Unverified**, read from the code rather than observed:
+- `summary_parsed` should be `True` here (the summary header is present and the exit code is 1), so the loop would retry rather than escalate, with a `TesterFailure` naming no tests — the Implementer would get "The suite did not pass." plus whatever `_failure_detail` extracts. Whether that detail contains the subtest assertion has not been checked.
+- `cli.discover_failure` would print `auto-discovered (0 failing test(s))` while handing the Planner output describing many.
+- How many real repos this affects: only seen on repos using `self.subTest`.
+
+The benchmark task set avoids every subtest-dependent candidate, so it does not hit this.
 
 ### Phase 5, complete as recorded
 
