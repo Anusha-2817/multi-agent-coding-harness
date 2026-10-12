@@ -1,0 +1,13 @@
+{
+  "source": null,
+  "date": null,
+  "note": "USD per million tokens, per model id as it appears in llm_response.model. Every price is null until filled in from the provider's pricing page; cost is reported as null while any price a run needs is null. input_per_mtok is charged on input_tokens minus cache_read_input_tokens.",
+  "models": {
+    "gemini-3.6-flash": {
+      "input_per_mtok": null,
+      "cached_input_per_mtok": null,
+      "output_per_mtok": null,
+      "thinking_per_mtok": null
+    }
+  }
+}
