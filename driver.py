@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -62,6 +63,9 @@ ARMS = ("A", "B", "C")
 #: Implementer call per attempt, plus one Reviewer call per reviewed attempt (C).
 CALLS_PER_RUN = {"A": (1, 5), "B": (2, 6), "C": (3, 11)}
 INFRA_CAP = 3
+#: Seconds between the starts of consecutive model calls. 12 s keeps a session
+#: at or under 5 calls a minute.
+MIN_CALL_INTERVAL = 12.0
 STOPPED_EARLY = 3
 
 
@@ -88,6 +92,42 @@ class Paths:
 
 class QuotaExhausted(Exception):
     """The daily allowance is spent. Raised inside the driver only."""
+
+
+class Pacer:
+    """Enforces a minimum gap between the *starts* of consecutive model calls.
+
+    Start to start, because a per-minute rate limit counts requests sent, not
+    responses received. One pacer per driver session, so the gap holds across
+    runs as well as within one. The clock and sleep are injectable so tests use a
+    fake clock instead of waiting.
+
+    What it cannot pace: retries the SDK makes inside one call, and the parse
+    repair turn, which is a second request inside one `complete_structured`.
+    """
+
+    def __init__(self, interval: float, *, clock=time.monotonic, sleep=time.sleep) -> None:
+        self.interval, self.clock, self.sleep = interval, clock, sleep
+        self.last_start: float | None = None
+
+    def wait(self) -> None:
+        if self.last_start is not None and self.interval > 0:
+            remaining = self.interval - (self.clock() - self.last_start)
+            if remaining > 0:
+                self.sleep(remaining)
+        self.last_start = self.clock()
+
+
+class PacedClient:
+    """A client wrapper: waits on the pacer, then delegates. Nothing else changes."""
+
+    def __init__(self, inner: Any, pacer: Pacer) -> None:
+        self.inner, self.pacer = inner, pacer
+
+    def complete_structured(self, **kwargs: Any) -> Any:
+        # The start is stamped before the call, so a call that raises still counts.
+        self.pacer.wait()
+        return self.inner.complete_structured(**kwargs)
 
 
 # -- safety ------------------------------------------------------------------
@@ -231,6 +271,8 @@ def drive(
     results: Path,
     max_calls: int | None = None,
     infra_cap: int = INFRA_CAP,
+    min_call_interval: float = MIN_CALL_INTERVAL,
+    pacer: Pacer | None = None,
     client_factory: Callable[[dict, str, int], Any] | None = None,
     paths: Paths = Paths(),
     out=print,
@@ -241,6 +283,7 @@ def drive(
     if client_factory is None:
         shared = LLMClient()
         client_factory = lambda task, arm, repeat: shared  # noqa: E731
+    pacer = pacer or Pacer(min_call_interval)
 
     done_rows = read_jsonl(results)
     done = {key_of(row) for row in done_rows}
@@ -270,7 +313,8 @@ def drive(
             return STOPPED_EARLY
 
         try:
-            row, run_log = run_one(entry, arm, repeat, client_factory(entry, arm, repeat), paths)
+            client = PacedClient(client_factory(entry, arm, repeat), pacer)
+            row, run_log = run_one(entry, arm, repeat, client, paths)
         except LLMTransportError as exc:
             wasted = _requests_in(exc.run_log)
             spent += wasted
@@ -311,14 +355,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-calls", type=int, default=None)
     parser.add_argument("--results", type=Path, default=BENCH / "results" / "results.jsonl")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--min-call-interval", type=float, default=MIN_CALL_INTERVAL,
+                        help="seconds between the starts of consecutive model calls (default 12)")
     args = parser.parse_args(argv)
 
+    if args.min_call_interval < 0:
+        parser.error("--min-call-interval must be >= 0")
     arms = [a.strip().upper() for a in args.arms.split(",") if a.strip()]
     unknown = sorted(set(arms) - set(ARMS))
     if unknown:
         parser.error(f"unknown arm(s): {', '.join(unknown)}")
     return drive(split=args.split, arms=arms, repeats=args.repeats, seed=args.seed,
-                 results=args.results, max_calls=args.max_calls)
+                 results=args.results, max_calls=args.max_calls,
+                 min_call_interval=args.min_call_interval)
 
 
 if __name__ == "__main__":

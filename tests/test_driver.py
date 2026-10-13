@@ -15,7 +15,8 @@ import pytest
 from fixture_edits import BUG, DISCOUNTS, FIX, fixing_edits
 
 import driver
-from driver import ARMS, STOPPED_EARLY, Paths, build_task, drive, plan
+from driver import (ARMS, MIN_CALL_INTERVAL, STOPPED_EARLY, PacedClient, Pacer, Paths, build_task,
+                    drive, main, plan)
 from harness.agents.base import AgentContractError
 from harness.agents.implementer import ImplementerResponse
 from harness.llm import DEFAULT_MODEL, LLMResult, LLMTransportError, LLMTruncatedError
@@ -89,10 +90,27 @@ def bench(tmp_path, monkeypatch):
     return paths, root / "results" / "results.jsonl"
 
 
+class FakeClock:
+    """Time that moves only when something sleeps. Records every sleep."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 def go(bench, factory=None, **kwargs):
     paths, results = bench
     lines: list[str] = []
-    options = {"split": "dev", "arms": list(ARMS), "repeats": 1, "seed": 0} | kwargs
+    clock = FakeClock()  # never really sleep in a test
+    options = {"split": "dev", "arms": list(ARMS), "repeats": 1, "seed": 0,
+               "pacer": Pacer(MIN_CALL_INTERVAL, clock=clock, sleep=clock.sleep)} | kwargs
     code = drive(results=results, paths=paths, out=lines.append,
                  client_factory=factory or (lambda task, arm, repeat: StubClient()), **options)
     return code, lines
@@ -233,6 +251,50 @@ class TestLimitsAndWarnings:
 
         assert code == 0 and len(rows(results)) == 3
         assert sum("WARNING: model_version changed" in line for line in lines) == 1
+
+
+class TestPacing:
+    def test_the_pacer_waits_only_for_what_is_left_of_the_interval(self):
+        clock = FakeClock()
+        pacer = Pacer(12, clock=clock, sleep=clock.sleep)
+
+        pacer.wait()  # first call: nothing to wait for
+        pacer.wait()  # immediately after: the whole interval
+        clock.now += 20
+        pacer.wait()  # 20 s later: already past it
+        clock.now += 5
+        pacer.wait()  # 5 s later: the remaining 7
+
+        assert clock.sleeps == [12, 7]
+
+    def test_a_call_that_raises_still_counts_as_a_start(self):
+        clock = FakeClock()
+        client = PacedClient(StubClient(error=UNAVAILABLE), Pacer(12, clock=clock, sleep=clock.sleep))
+        for _ in range(2):
+            with pytest.raises(LLMTransportError):
+                client.complete_structured(system="", user="", schema=Plan, max_tokens=1)
+        assert clock.sleeps == [12]
+
+    def test_every_call_in_a_session_is_paced_across_runs(self, bench):
+        clock = FakeClock()
+        # A then C (or C then A): 1 + 3 = 4 calls, so 3 gaps of the full interval.
+        go(bench, arms=["A", "C"], pacer=Pacer(12, clock=clock, sleep=clock.sleep))
+        assert clock.sleeps == [12, 12, 12]
+
+    def test_zero_interval_never_sleeps(self, bench):
+        clock = FakeClock()
+        go(bench, arms=["C"], pacer=Pacer(0, clock=clock, sleep=clock.sleep))
+        assert clock.sleeps == []
+
+    def test_the_flag_defaults_to_12_and_rejects_negatives(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(driver, "drive", lambda **kw: seen.update(kw) or 0)
+        main(["--split", "dev"])
+        assert seen["min_call_interval"] == 12
+        main(["--split", "dev", "--min-call-interval", "0.5"])
+        assert seen["min_call_interval"] == 0.5
+        with pytest.raises(SystemExit):
+            main(["--split", "dev", "--min-call-interval", "-1"])
 
 
 class TestSafety:
