@@ -297,6 +297,62 @@ class TestPacing:
             main(["--split", "dev", "--min-call-interval", "-1"])
 
 
+def add_tasks(bench, extra: dict[str, str]) -> None:
+    """More manifest entries on the same upstream repo: {task_id: split}."""
+    paths, _ = bench
+    manifest = json.loads(paths.manifest.read_text())
+    for task_id, split in extra.items():
+        manifest.append({**manifest[0], "task": task_id, "split": split})
+        shutil.copytree(paths.hidden / "fix1", paths.hidden / task_id)
+    paths.manifest.write_text(json.dumps(manifest))
+
+
+class TestTaskFlag:
+    def test_one_task_only(self, bench):
+        _, results = bench
+        add_tasks(bench, {"fix2": "dev"})
+
+        code, lines = go(bench, task_ids=["fix2"])
+
+        assert code == 0
+        assert lines[0] == "3 run(s) left on the dev split; estimated 6-22 model calls."
+        written = rows(results)
+        assert {r["task"] for r in written} == {"fix2"}
+        # Same arm order as fix2 gets in the unfiltered plan: narrowing changes no seeding.
+        full = [a for t, a, _ in plan([{"task": "fix1"}, {"task": "fix2"}], list(ARMS), 1, 0)
+                if t["task"] == "fix2"]
+        assert [r["arm"] for r in written] == full
+
+    def test_an_unknown_id_stops_and_lists_the_valid_ones(self, bench):
+        add_tasks(bench, {"fix2": "dev"})
+        called = []
+
+        with pytest.raises(SystemExit, match=r"unknown task id\(s\) for the dev split: nope\. "
+                                             r"Valid ids: fix1, fix2"):
+            go(bench, lambda *a: called.append(a), task_ids=["fix1", "nope"])
+        assert called == []  # stopped before any run
+
+    def test_task_works_with_split(self, bench):
+        _, results = bench
+        add_tasks(bench, {"fix3": "eval"})
+
+        # An eval task is not a dev task: the split still applies.
+        with pytest.raises(SystemExit, match=r"for the dev split: fix3\. Valid ids: fix1$"):
+            go(bench, task_ids=["fix3"])
+
+        code, _ = go(bench, split="eval", task_ids=["fix3"], arms=["A"])
+        assert code == 0
+        assert [(r["task"], r["arm"]) for r in rows(results)] == [("fix3", "A")]
+
+    def test_the_flag_takes_repeats_and_commas(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(driver, "drive", lambda **kw: seen.update(kw) or 0)
+        main(["--split", "dev", "--task", "a,b", "--task", "c"])
+        assert seen["task_ids"] == ["a", "b", "c"]
+        main(["--split", "dev"])
+        assert seen["task_ids"] is None
+
+
 class TestSafety:
     def test_refuses_results_inside_a_git_repo(self, bench, tmp_path):
         paths, _ = bench

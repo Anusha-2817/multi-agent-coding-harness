@@ -180,6 +180,24 @@ def build_task(entry: dict[str, Any], paths: Paths) -> Path:
     return target
 
 
+def select_tasks(manifest: list[dict], split: str, task_ids: list[str] | None) -> list[dict]:
+    """The split's tasks, narrowed to `task_ids` when given, in manifest order.
+
+    Narrowing only removes tasks: `plan` seeds each task's arm order by its own
+    id, so a task runs its arms in the same order with or without `--task`, and
+    resume keys are unchanged.
+    """
+    in_split = [t for t in manifest if t["split"] == split]
+    if not task_ids:
+        return in_split
+    valid = [t["task"] for t in in_split]
+    unknown = [task_id for task_id in dict.fromkeys(task_ids) if task_id not in valid]
+    if unknown:
+        raise SystemExit(f"unknown task id(s) for the {split} split: {', '.join(unknown)}. "
+                         f"Valid ids: {', '.join(valid)}")
+    return [t for t in in_split if t["task"] in task_ids]
+
+
 def plan(tasks: list[dict], arms: list[str], repeats: int, seed: int) -> Iterator[tuple[dict, str, int]]:
     for repeat in range(repeats):
         for task in tasks:
@@ -273,13 +291,14 @@ def drive(
     infra_cap: int = INFRA_CAP,
     min_call_interval: float = MIN_CALL_INTERVAL,
     pacer: Pacer | None = None,
+    task_ids: list[str] | None = None,
     client_factory: Callable[[dict, str, int], Any] | None = None,
     paths: Paths = Paths(),
     out=print,
 ) -> int:
     check_outputs([results.parent, paths.tasks, paths.runs, paths.logs], paths.protected)
 
-    tasks = [t for t in json.loads(paths.manifest.read_text(encoding="utf-8")) if t["split"] == split]
+    tasks = select_tasks(json.loads(paths.manifest.read_text(encoding="utf-8")), split, task_ids)
     if client_factory is None:
         shared = LLMClient()
         client_factory = lambda task, arm, repeat: shared  # noqa: E731
@@ -355,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-calls", type=int, default=None)
     parser.add_argument("--results", type=Path, default=BENCH / "results" / "results.jsonl")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--task", action="append", default=[],
+                        help="task id from the manifest; repeat or comma-separate to run several")
     parser.add_argument("--min-call-interval", type=float, default=MIN_CALL_INTERVAL,
                         help="seconds between the starts of consecutive model calls (default 12)")
     args = parser.parse_args(argv)
@@ -365,9 +386,10 @@ def main(argv: list[str] | None = None) -> int:
     unknown = sorted(set(arms) - set(ARMS))
     if unknown:
         parser.error(f"unknown arm(s): {', '.join(unknown)}")
+    task_ids = [t.strip() for value in args.task for t in value.split(",") if t.strip()]
     return drive(split=args.split, arms=arms, repeats=args.repeats, seed=args.seed,
                  results=args.results, max_calls=args.max_calls,
-                 min_call_interval=args.min_call_interval)
+                 min_call_interval=args.min_call_interval, task_ids=task_ids or None)
 
 
 if __name__ == "__main__":
