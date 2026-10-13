@@ -1,0 +1,62 @@
+tests/test_driver.py
+  s_4b4a5821e0f6d0::t_671ac561aa446e 300-355
+driver.py
+  s_4b4a5821e0f6d0::t_1c5f12f9b4216e 183-200,294,301,377-378,389,392
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "ac0df808621d962c50b692e1794a97efa9ee0ba0",
+  "branch": "main",
+  "prompts": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:ddad76c9b8db0cbf1fc0a5360ceb963ab54a0f118665e650e31d81845dceb55c",
+      "total_additions": 80,
+      "total_deletions": 2,
+      "accepted_lines": 452,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:ddad76c9b8db0cbf1fc0a5360ceb963ab54a0f118665e650e31d81845dceb55c",
+      "stats": {
+        "total_additions": 80,
+        "total_deletions": 2,
+        "accepted_lines": 452,
+        "overriden_lines": 0,
+        "files": {
+          "driver.py": {
+            "total_additions": 24,
+            "total_deletions": 2,
+            "accepted_lines": 396,
+            "overriden_lines": 0
+          },
+          "tests/test_driver.py": {
+            "total_additions": 56,
+            "total_deletions": 0,
+            "accepted_lines": 56,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
