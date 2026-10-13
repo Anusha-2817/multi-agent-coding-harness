@@ -12,7 +12,7 @@ same on every resume, and stopping early leaves balanced results.
 
 | Exception | What happens |
 | --- | --- |
-| `LLMTransportError`, 429, `retryable=False` (daily quota) | stop cleanly; the cut-off run is not written |
+| `LLMTransportError`, 429, 402 or 401, `retryable=False` (daily quota, credits, key) | stop cleanly; the cut-off run is not written |
 | any other `LLMTransportError` | infrastructure: not written, redone on resume, capped per run |
 | `LLMResponseError` (incl. truncated, refused) | a genuine outcome: scored as crashed, with the type |
 | anything else, `AgentContractError` included | a harness bug: re-raised with its traceback |
@@ -50,10 +50,11 @@ from baseline import run_baseline
 from cli import DEFAULT_DESCRIPTION, discover_failure
 from harness.agents.tester import PYTEST_TESTS_FAILED
 from harness.events import EventLog
-from harness.llm import LLMClient, LLMResponseError, LLMTransportError
+from harness.llm import LLMClient, LLMError, LLMResponseError, LLMTransportError
 from harness.state import TaskState, make_task_id
 from harness.workspace import prepare_run_dir
 from harness_arms import ArmEventLog, always_approve, run_arm
+from llm_openrouter import OpenRouterClient
 from scorer import read_events, score_run
 
 EXPERIMENTS = Path(r"D:\Agentic_Project1\experiments")
@@ -67,6 +68,15 @@ INFRA_CAP = 3
 #: at or under 5 calls a minute.
 MIN_CALL_INTERVAL = 12.0
 STOPPED_EARLY = 3
+BACKENDS = {"google": LLMClient, "openrouter": OpenRouterClient}
+#: Non-retryable statuses that mean no further call can succeed this session,
+#: with what the driver prints and the incident kind it records: Google's daily
+#: quota (429), OpenRouter's exhausted credits (402), and a rejected key (401).
+STOP_STATUSES = {
+    429: ("daily quota exhausted", "quota"),
+    402: ("credits exhausted", "quota"),
+    401: ("API key rejected; check the key named in the error", "auth"),
+}
 
 
 @dataclass(frozen=True)
@@ -292,6 +302,7 @@ def drive(
     min_call_interval: float = MIN_CALL_INTERVAL,
     pacer: Pacer | None = None,
     task_ids: list[str] | None = None,
+    backend: str = "google",
     client_factory: Callable[[dict, str, int], Any] | None = None,
     paths: Paths = Paths(),
     out=print,
@@ -300,7 +311,10 @@ def drive(
 
     tasks = select_tasks(json.loads(paths.manifest.read_text(encoding="utf-8")), split, task_ids)
     if client_factory is None:
-        shared = LLMClient()
+        try:
+            shared = BACKENDS[backend]()
+        except LLMError as exc:  # a missing key: stop before any run, never echoing a key
+            raise SystemExit(f"cannot start the {backend} backend: {exc}") from None
         client_factory = lambda task, arm, repeat: shared  # noqa: E731
     pacer = pacer or Pacer(min_call_interval)
 
@@ -337,16 +351,17 @@ def drive(
         except LLMTransportError as exc:
             wasted = _requests_in(exc.run_log)
             spent += wasted
-            daily = exc.status_code == 429 and not exc.retryable
+            stop = STOP_STATUSES.get(exc.status_code) if not exc.retryable else None
             append_jsonl(incidents_path(results), {
                 "task": key[0], "arm": arm, "repeat": repeat,
-                "kind": "quota" if daily else "infrastructure",
+                "kind": stop[1] if stop else "infrastructure",
                 "exception": f"{type(exc).__name__}: {exc}"[:500],
                 "wasted_calls": wasted, "run_log": str(exc.run_log),
             })
-            if daily:
+            if stop:
                 left = todo[index:]
-                out(f"stopping: daily quota exhausted. {len(left)} run(s) left:")
+                out(f"stopping: {stop[0]} (HTTP {exc.status_code}). "
+                    f"{len(left)} run(s) left:")
                 for t, a, r in left:
                     out(f"  {t['task']} arm {a} repeat {r}")
                 return STOPPED_EARLY
@@ -374,6 +389,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-calls", type=int, default=None)
     parser.add_argument("--results", type=Path, default=BENCH / "results" / "results.jsonl")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--backend", choices=sorted(BACKENDS), default="google",
+                        help="google (GEMINI_API_KEY) or openrouter (OPENROUTER_API_KEY)")
     parser.add_argument("--task", action="append", default=[],
                         help="task id from the manifest; repeat or comma-separate to run several")
     parser.add_argument("--min-call-interval", type=float, default=MIN_CALL_INTERVAL,
@@ -389,7 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     task_ids = [t.strip() for value in args.task for t in value.split(",") if t.strip()]
     return drive(split=args.split, arms=arms, repeats=args.repeats, seed=args.seed,
                  results=args.results, max_calls=args.max_calls,
-                 min_call_interval=args.min_call_interval, task_ids=task_ids or None)
+                 min_call_interval=args.min_call_interval, task_ids=task_ids or None,
+                 backend=args.backend)
 
 
 if __name__ == "__main__":

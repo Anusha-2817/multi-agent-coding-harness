@@ -179,12 +179,85 @@ class TestQuota:
 
         assert code == STOPPED_EARLY
         assert len(rows(results)) == 1  # the cut-off run is not written
-        assert any("daily quota exhausted. 2 run(s) left" in line for line in lines)
+        assert any("daily quota exhausted (HTTP 429). 2 run(s) left" in line for line in lines)
         [incident] = incidents(results)
         assert incident["kind"] == "quota" and incident["wasted_calls"] == 1
 
         assert go(bench)[0] == 0
         assert len(rows(results)) == 3
+
+
+    def test_exhausted_openrouter_credits_stop_like_the_daily_quota(self, bench):
+        _, results = bench
+        credits = LLMTransportError("HTTP 402", status_code=402, retryable=False)
+        code, lines = go(bench, lambda task, arm, repeat: StubClient(error=credits))
+
+        assert code == STOPPED_EARLY and rows(results) == []
+        assert [i["kind"] for i in incidents(results)] == ["quota"]
+        assert any("(HTTP 402). 3 run(s) left" in line for line in lines)
+
+
+class TestBadKey:
+    SECRET = "sk-or-test-SECRET-401"
+
+    def test_a_rejected_key_stops_cleanly_without_printing_it(self, bench):
+        import httpx
+        from llm_openrouter import OpenRouterClient
+
+        _, results = bench
+        # The fake API even echoes the key back, the worst case for leaking it.
+        api = lambda request: httpx.Response(  # noqa: E731
+            401, json={"error": {"code": 401, "message": f"bad key {self.SECRET}"}})
+        factory = lambda task, arm, repeat: OpenRouterClient(  # noqa: E731
+            api_key=self.SECRET, transport=httpx.MockTransport(api))
+
+        code, lines = go(bench, factory)
+
+        assert code == STOPPED_EARLY and rows(results) == []
+        assert any("API key rejected; check the key named in the error (HTTP 401). 3 run(s) left"
+                   in line for line in lines)
+        [incident] = incidents(results)
+        assert incident["kind"] == "auth"
+        assert "OPENROUTER_API_KEY" in incident["exception"]
+        written = "\n".join(lines) + results.with_name(results.stem + ".incidents.jsonl").read_text()
+        for log in bench[0].logs.rglob("*.jsonl"):
+            written += log.read_text(encoding="utf-8")
+        assert self.SECRET not in written
+
+    def test_a_missing_key_stops_before_any_run(self, bench, monkeypatch):
+        paths, results = bench
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        with pytest.raises(SystemExit, match="cannot start the openrouter backend: .*OPENROUTER_API_KEY"):
+            drive(split="dev", arms=["A"], repeats=1, seed=0, results=results, paths=paths,
+                  backend="openrouter", out=lambda s: None)
+        assert rows(results) == [] and not paths.runs.exists()
+
+
+class TestBackendFlag:
+    def test_backend_picks_the_client_class(self, bench, monkeypatch):
+        built = []
+
+        class Fake(StubClient):
+            def __init__(self):
+                built.append(type(self).__name__)
+                super().__init__()
+
+        monkeypatch.setitem(driver.BACKENDS, "openrouter", Fake)
+        paths, results = bench
+        clock = FakeClock()
+        drive(split="dev", arms=["A"], repeats=1, seed=0, results=results, paths=paths,
+              backend="openrouter", pacer=Pacer(0, clock=clock, sleep=clock.sleep), out=lambda s: None)
+        assert built == ["Fake"] and len(rows(results)) == 1
+
+    def test_the_flag_defaults_to_google(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(driver, "drive", lambda **kw: seen.update(kw) or 0)
+        main(["--split", "dev"])
+        assert seen["backend"] == "google"
+        main(["--split", "dev", "--backend", "openrouter"])
+        assert seen["backend"] == "openrouter"
+        with pytest.raises(SystemExit):
+            main(["--split", "dev", "--backend", "anthropic"])
 
 
 class TestInfrastructure:
