@@ -1,0 +1,81 @@
+tests/test_llm_openrouter.py
+  s_4b4a5821e0f6d0::t_b3118c0349d6ba 1-141,151-212
+  s_4b4a5821e0f6d0::t_922abcc1231c9b 142-150
+driver.py
+  s_4b4a5821e0f6d0::t_d254e730dbb78f 15,53,57,71-79,305,314-317,354,357,361,363-364,392-393,409-410
+llm_openrouter.py
+  s_4b4a5821e0f6d0::t_4b1ab837bd27d4 1-277
+tests/test_driver.py
+  s_4b4a5821e0f6d0::t_d254e730dbb78f 182
+  s_4b4a5821e0f6d0::t_ade13d7085e190 200-235
+  s_4b4a5821e0f6d0::t_723b23577c0ad2 190-199,236-262
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "bee254a3cdfddbd8dda895769735fc9f837ae9f2",
+  "branch": "main",
+  "prompts": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:10e07fae51d57a1f10241744189aae4bbda10a43931d0e4886cbe393295b771b",
+      "total_additions": 601,
+      "total_deletions": 21,
+      "accepted_lines": 977,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_4b4a5821e0f6d0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb081ea8-059d-4e12-a6ec-e3ee8a0e46ca",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:10e07fae51d57a1f10241744189aae4bbda10a43931d0e4886cbe393295b771b",
+      "stats": {
+        "total_additions": 601,
+        "total_deletions": 21,
+        "accepted_lines": 977,
+        "overriden_lines": 0,
+        "files": {
+          "driver.py": {
+            "total_additions": 33,
+            "total_deletions": 15,
+            "accepted_lines": 414,
+            "overriden_lines": 0
+          },
+          "llm_openrouter.py": {
+            "total_additions": 281,
+            "total_deletions": 4,
+            "accepted_lines": 277,
+            "overriden_lines": 0
+          },
+          "tests/test_driver.py": {
+            "total_additions": 75,
+            "total_deletions": 2,
+            "accepted_lines": 74,
+            "overriden_lines": 0
+          },
+          "tests/test_llm_openrouter.py": {
+            "total_additions": 212,
+            "total_deletions": 0,
+            "accepted_lines": 212,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
