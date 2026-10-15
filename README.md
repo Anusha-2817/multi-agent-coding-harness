@@ -5,7 +5,7 @@ Implementer, Reviewer, Tester — collaborate through typed state handoffs to re
 tasks, with built-in failure recovery and a human-approval gate before any irreversible action.
 
 **Status:** the loop is built and measured. Four real LLM-backed agents, three fixture repos,
-432 harness tests that make zero API calls, and saved run transcripts. What follows reports what
+563 harness tests that make zero API calls, and saved run transcripts. What follows reports what
 it does and what measuring it produced — including two findings that cost the fixtures their
 traps.
 
@@ -271,7 +271,7 @@ Everything below is from saved transcripts in `transcripts/`, not from memory.
 
 ### The harness suite
 
-**487 tests, all passing, ~175s, and zero API calls.** No test needs an API key; the SDK is
+**563 tests, all passing, ~500s, and zero API calls.** No test needs an API key; the SDK is
 faked wherever it is reached for. Two `pytest.ini` files keep the harness suite and the fixture
 suites from ever collecting together — a fixture's deliberate bug is *data*, and reporting it as
 a harness failure would make the harness suite permanently red. The fixture-local ini is the
@@ -390,6 +390,23 @@ Neither probe measures the **routing between** the halves — that a rejection b
 survives the reset, and arrives in the Implementer's next prompt. That is covered by tests with
 stubs and has never run end-to-end against real models, because no real run has ever taken a
 retry. Every fixture built to force one was rescued by the Planner instead.
+
+## Benchmark (in progress)
+
+Three arms, run on the same tasks with the same model, token limits, attempt cap and Tester:
+
+- **A** — one agent, no Planner and no Reviewer: one prompt with the failing output and the repo.
+- **B** — the harness without the Reviewer: Planner, Implementer and Tester, same loop as C.
+- **C** — the full harness: Planner, Implementer, Reviewer and Tester.
+
+Four scripts at the repo root, none of them part of the shipped CLI:
+`baseline.py` (arm A), `harness_arms.py` (arms B and C), `scorer.py` (scores one finished
+run against the hidden upstream test) and `driver.py` (runs the arms over the task set,
+resumable). Nine tasks are defined: small real upstream bug fixes, three for development and six
+for evaluation. Live runs are **partial** so far, limited by free-tier API quotas.
+
+The arms run model-written code against each task's tests on your machine. The same safety note
+applies: trusted repos only, no sandbox yet.
 
 ## Running it
 

@@ -1199,6 +1199,10 @@ probe_reviewer.py   instrument, not a component. Nine real calls; outside tests/
 probe_implementer.py instrument. One real call (the plan is cached from a transcript)
 probe_plan.json     fixture 3's plan, fetched by probe_reviewer --fetch-plan. One call
 probe_plan_fixture_1.json  fixture 1's plan, lifted from a saved run. No call spent
+baseline.py         benchmark arm A: one agent, no Planner, no Reviewer. Outside cli.py on purpose
+harness_arms.py     benchmark arms B and C: the real run_task, auto-approved, Reviewer swapped in B
+scorer.py           scores one finished run: restore the hidden tests, run the suite, one JSON row
+driver.py           runs the arms over the task set, resumable; stops cleanly on quota or a bad key
 CLAUDE.md
 README.md
 ```
