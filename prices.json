@@ -15,7 +15,9 @@
       "input_per_mtok": 0.75,
       "cached_input_per_mtok": 0.075,
       "output_per_mtok": 3.75,
-      "thinking_per_mtok": null
+      "thinking_per_mtok": 3.75,
+      "thinking_source": "OpenRouter endpoints listing (api/v1/models/google/gemini-3.8-flash/endpoints), google-ai-studio standard tier: internal_reasoning 0.00000375 per token, equal to completion. Listed separately, not assumed.",
+      "thinking_date": "2026-10-17"
     }
   }
 }

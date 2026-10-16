@@ -185,9 +185,20 @@ class TestCost:
         assert entry["date"] == "2026-10-16" and "promotional" in entry["source"]
         assert (entry["input_per_mtok"], entry["cached_input_per_mtok"], entry["output_per_mtok"]) == (
             0.75, 0.075, 3.75)
-        # Not given with the listing, so not invented: a run with thinking tokens
-        # still costs null until this is filled in.
-        assert entry["thinking_per_mtok"] is None
+        # Filled a day later from the endpoints listing's own `internal_reasoning`
+        # field, which happens to equal the completion price -- sourced, not assumed.
+        assert entry["thinking_per_mtok"] == 3.75
+        assert entry["thinking_date"] == "2026-10-17" and "internal_reasoning" in entry["thinking_source"]
+
+    def test_a_38_run_with_thinking_tokens_gets_a_cost(self):
+        from scorer import cost, load_prices
+
+        prices = load_prices(Path(__file__).resolve().parent.parent / "prices.json")
+        events = [{"event": "llm_response", "payload": {"model": "google/gemini-3.8-flash", "usage": {
+            "input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0,
+            "thinking_tokens": 1_000_000}}}]
+
+        assert cost(events, prices) == pytest.approx(3.75)
 
     def test_a_38_run_without_thinking_tokens_gets_a_cost(self):
         from scorer import cost, load_prices
