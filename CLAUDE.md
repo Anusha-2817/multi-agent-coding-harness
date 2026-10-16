@@ -1148,7 +1148,7 @@ python-slugify has no task: its recent fixes have 39–58k-character repos and f
 
 ## Diff-mode edits
 
-`--edit-format full|diff`, **default `full`**, on `baseline.py` (A), `harness_arms.py` (B, C) and `driver.py`. `cli.py` does not have it: whether diff becomes the shipped default is decided by the gate below, not before it. Built offline on 2026-10-16; **not yet run against a model.**
+`--edit-format full|diff`, **default `full`**, on `baseline.py` (A), `harness_arms.py` (B, C) and `driver.py`. `cli.py` does not have it: whether diff becomes the shipped default is decided by the gate below, not before it. Built offline on 2026-10-16 on branch `diff-edits`. **Stages 1 and 2 of the gate have run and passed; stage 3 has not.** See F11.
 
 **Why.** F6 (schema, 3.6) and the 3.8 eval runs showed the same thing: a correct fix wrapped in corruption on lines the plan never touched. humps arm C (`armC_humps_2a462a7_20261016T153103Z`) had attempt 1 rejected for an un-indented line in `pascalize`, attempt 2 for `PASCAL_RE` broken by a line break plus three docstring types changed to `bool`; attempt 3 was one clean hunk. Each attempt re-emitted the whole file (~2,035 output tokens) to change one line. tokenize-rt arm A rewrote `tests/tokenize_rt_test.py` — a file arm A is shown **by path only** — three times, once into a stub that would not collect.
 
@@ -2243,6 +2243,45 @@ The benchmark task set avoids every subtest-dependent candidate, so it does not 
 - **Whether a re-plan would have helped.** v1 never replans, so every retry re-read the same test-only plan. Under "Fixture design: the recoverability constraint", a wrong plan is unrecoverable by construction, which matches what happened, but no run has tested a second plan.
 
 **Status: recorded, nothing built.** This is the **first candidate for the parked re-plan gate** (routing back to the Planner, behind the scope fence as a v2 item). It is not yet a reason to build it: one run, one task, one model. It is also the **first observed instance** of "A known hole: a plan that targets a test file", whose named fix is a `Plan` validator rejecting test paths in `target_files`. That trigger has now fired once; the decision is still open.
+
+### F11 — Diff-based edits: provisional gate passed
+
+`experiments/bench/results/eval_38_diff.jsonl` (12 rows), compared against the same cells of `eval_38.jsonl`. Model: `google/gemini-3.8-flash` via OpenRouter on every row. **Every cell is one run (repeat 0).** `--edit-format` still defaults to `full`. The work is on branch `diff-edits`; tag `v0.1.0` is the full-file-only first benchmark.
+
+**The staged gate, as run** (see "Diff-mode edits"):
+
+1. **Smoke test.** humps, arm C, diff mode, one run, run by the user in their own terminal. Reported as resolved in 3 calls with no repair call. Whether that run is the humps C row in `eval_38_diff.jsonl` is not recorded here. That row's log, read afterwards, meets the two criteria the report did not cover: the one Implementer call output **124 tokens** (full mode: ~2,035 per call), and `diff_rendered` is **one hunk**, the `SPLIT_RE` line.
+2. **Provisional gate.** tokenize-rt plus humps, cfgv and shortuuid, repeat 0, arms A, B and C.
+3. **Full-split gate.** Not run. It waits for OpenRouter credits.
+
+**Measured** (from the two results files and the run logs):
+
+| Task | calls A / B / C, full | calls A / B / C, diff | output tokens, full → diff (A / B / C) |
+| --- | --- | --- | --- |
+| humps | 1 / 2 / 7 | 3 / 2 / 3 | 2022→514, 2285→473, 6679→551 |
+| cfgv | 1 / 2 / 5 | 1 / 2 / 3 | 3867→70, 4076→322, 8176→433 |
+| shortuuid | 1 / 2 / 5 | 1 / 2 / 3 | 1726→134, 1923→338, 3949→461 |
+| tokenize-rt | 5 / 5 / 11 | 5 / 3 / 8 | 10422→1601, 8247→1039, 10558→1998 |
+
+**Proved, against the stage 2 criteria:**
+- **No previously solved task was lost.** humps, cfgv and shortuuid are solved by all three arms in both formats. tokenize-rt is unsolved by all three in both.
+- **Output tokens per run fell 75 to 98% in every cell** (median about −88% over the 12), well past the ≥ 50% bar.
+- **No edit failed to apply.** 0 of 12 runs logged `edit_apply_failed`, and no repair call was made. The repair path has therefore never run against a model.
+- **Calls per resolved run were no higher than full mode in any cell**, and lower for C (humps 7→3, cfgv 5→3, shortuuid 5→3). Arm A on humps is the exception: 1→3 calls. It was still resolved, so it does not fail the criterion as written, but it is the one cell that got more expensive in calls; see below.
+- **C solved humps, cfgv and shortuuid on attempt 1**, where full mode took 3, 2 and 2 attempts. That is consistent with the Reviewer's full-mode rejections coming from collateral damage in whole-file rewrites (the humps case is documented above), but one run per cell does not prove it.
+- **No new `crashed` or `escalated_broken_suite`.**
+- **Every diff-mode attempt rendered as a single hunk**, all 22 of them across all arms (from `diff_rendered` in the run logs).
+- **tokenize-rt is unchanged.** Unsolved by every arm. In diff mode A hit the retry limit, and B and C ended in `escalated_livelock` (in full-mode repeat 0, B ended in livelock and C hit the retry limit).
+
+**Not shown, and not to be claimed:**
+- **Repeats.** n=1 per cell. A single sample can look like an improvement or a regression.
+- **Harder tasks.** Five of six eval tasks are solved by every arm in full mode, so solve rate cannot move on them. The gate measured cost and attempts, not capability.
+- **Thinking tokens in diff mode.** Every Implementer and baseline call in diff mode logged `thinking_tokens: 0`, in all three arms. Planner and Reviewer calls in C logged non-zero thinking (263 to 3,562 per run). Whether 0 is a real zero or a reporting gap on the OpenRouter path is not established; the full-mode 3.8 benchmark logs also show many 0s. Until that is settled, "output tokens" in the table excludes thinking, and the per-run totals should not be read as total generated tokens.
+- **The humps arm A three-attempt run.** A took 3 attempts in diff mode against 1 in full mode, each attempt a single hunk. One run cannot say whether that is noise or a real effect of the format on arm A.
+- **Cost.** `cost_usd` is filled for runs with no thinking tokens (the A and B rows) and null for C, because `thinking_per_mtok` for 3.8 is not set. It is not reported, and the 3.8 price is a dated promotional one.
+- **Comparability with 3.6.** The `*_gemini36` results are a different model and are not mixed with these.
+
+**Decision.** Provisionally keep diff mode **as an option**. `--edit-format` stays `full` by default in every script, and `cli.py` stays full-only until the stage 3 full-split gate has run.
 
 ### Phase 5, complete as recorded
 
