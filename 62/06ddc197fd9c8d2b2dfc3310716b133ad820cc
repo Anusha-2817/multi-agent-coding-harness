@@ -1,0 +1,72 @@
+CLAUDE.md
+  s_c7c74edf33c24d::t_f800a6aee00ceb 2247-2271,2274-2278,2280-2285
+  s_c7c74edf33c24d::t_0bc637e889aa7c 2272-2273
+  s_c7c74edf33c24d::t_8eb618a51cd1f1 2279
+  s_c7c74edf33c24d::t_85e7b57e80a17d 1151
+README.md
+  s_c7c74edf33c24d::t_3d932dddf4c59f 259-261
+  s_c7c74edf33c24d::t_3dfde6482d9343 105
+  s_c7c74edf33c24d::t_554bd2c7c29d8a 249-250
+  s_c7c74edf33c24d::t_d085c6b03323d5 393-398,400,402-404,406-475,480-481
+  s_c7c74edf33c24d::t_aff85189c88e4d 545-547
+  s_c7c74edf33c24d::t_6fe8db0fb0f4ba 8-11
+  s_c7c74edf33c24d::t_3ed544f6471a12 531-533
+  s_c7c74edf33c24d::t_249f207f4d6ed8 277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "6206ddc197fd9c8d2b2dfc3310716b133ad820cc",
+  "branch": "diff-edits",
+  "prompts": {
+    "s_c7c74edf33c24d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85933b5d-c0ee-4f1d-90f4-a4023c5bad7b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:3334d330c284e49cb52423ad6e51c101a9366471d7d38ae39aa6f7da2003eee4",
+      "total_additions": 141,
+      "total_deletions": 25,
+      "accepted_lines": 2479,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_c7c74edf33c24d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85933b5d-c0ee-4f1d-90f4-a4023c5bad7b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:3334d330c284e49cb52423ad6e51c101a9366471d7d38ae39aa6f7da2003eee4",
+      "stats": {
+        "total_additions": 141,
+        "total_deletions": 25,
+        "accepted_lines": 2479,
+        "overriden_lines": 0,
+        "files": {
+          "CLAUDE.md": {
+            "total_additions": 42,
+            "total_deletions": 3,
+            "accepted_lines": 2380,
+            "overriden_lines": 0
+          },
+          "README.md": {
+            "total_additions": 99,
+            "total_deletions": 22,
+            "accepted_lines": 99,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
