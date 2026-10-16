@@ -101,6 +101,10 @@ def score_run(
         "collected_after": after["collected"],
         "collected_delta": delta,
         "attempts": _attempts(events, finished),
+        "edit_format": started["payload"].get("edit_format", "full") if started else "full",
+        "edit_apply_failures": len(_named(events, "edit_apply_failed")),
+        "edit_repairs": sum(1 for e in _named(events, "llm_request")
+                            if e["payload"].get("repair_of") == "edit_apply"),
         "model_versions": sorted({e["payload"]["model"] for e in events
                                   if e["event"] == "llm_response" and e["payload"].get("model")}),
         "wall_time_s": _wall_time(events),
@@ -110,6 +114,7 @@ def score_run(
         "flags": {
             "test_files_edited": patch["test_files"],
             "applied_test_paths": _applied_test_paths(events),
+            "test_path_apply_failures": _test_path_apply_failures(events),
             "final_patch": patch,
             "upstream": {
                 "src_files": task["src_files"],
@@ -214,6 +219,10 @@ def _first(events: list[dict], name: str) -> dict | None:
     return next((e for e in events if e.get("event") == name), None)
 
 
+def _named(events: list[dict], name: str) -> list[dict]:
+    return [e for e in events if e.get("event") == name]
+
+
 def calls_by_agent(events: list[dict]) -> dict[str, dict[str, Any]]:
     """Requests, responses and token sums per agent. A request with no response failed.
 
@@ -261,6 +270,18 @@ def _applied_test_paths(events: list[dict]) -> list[str]:
     """Test paths in any `edits_applied`, classified here so A, B and C agree."""
     paths = {normalize_path(p) for e in events if e.get("event") == "edits_applied"
              for p in e["payload"].get("paths", [])}
+    return sorted(p for p in paths if _is_test_file(p))
+
+
+def _test_path_apply_failures(events: list[dict]) -> list[str]:
+    """Test paths named by an `edit_apply_failed`: diff-mode edits that never applied.
+
+    Diff mode cannot edit a file whose contents the model was never shown, and arm
+    A is shown test files by path only. This keeps that effect of the format
+    visible apart from its token effect (CLAUDE.md, "Diff-mode edits").
+    """
+    paths = {normalize_path(f["path"]) for e in _named(events, "edit_apply_failed")
+             for f in e["payload"].get("failures", [])}
     return sorted(p for p in paths if _is_test_file(p))
 
 

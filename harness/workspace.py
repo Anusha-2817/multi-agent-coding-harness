@@ -15,7 +15,9 @@ whole lifecycle of the run directory is readable in one place.
 
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 from pathlib import Path, PurePosixPath
 
 from harness.state import FileEdit
@@ -175,9 +177,9 @@ def apply_edits(repo_path: str | Path, edits: list[FileEdit]) -> list[str]:
     diff. Invariant 1 is a property of that call site, not of this function --
     which is why nothing here checks for a verdict. Do not add a second caller.
 
-    `FileEdit` is full file replacement, so each edit is one `write_text`. Paths
-    are created if missing: a plan may legitimately name a file that does not
-    exist yet.
+    `FileEdit` is full file replacement, so each edit is one atomic whole-file
+    write (`_write_atomically`). Paths are created if missing: a plan may
+    legitimately name a file that does not exist yet.
 
     Raises `ValueError` if an edit resolves outside `repo_path`. That should be
     unreachable -- the scope check has already confined every path to
@@ -200,10 +202,35 @@ def apply_edits(repo_path: str | Path, edits: list[FileEdit]) -> list[str]:
             )
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        # newline="\n" so the bytes on disk are the bytes the diff was rendered
-        # from. Windows text mode would translate to CRLF and make the applied
-        # file differ from the diff the human approved.
-        target.write_text(edit.new_content, encoding="utf-8", newline="\n")
+        _write_atomically(target, edit.new_content)
         written.append(relative)
 
     return written
+
+
+def _write_atomically(target: Path, content: str) -> None:
+    """Write `content` to `target` so the file is only ever old or new, never partial.
+
+    A safety change, not a behaviour change, and it applies to both edit
+    formats: the bytes that land are exactly what `write_text` wrote before. The
+    content goes to a temporary file in the same directory, which is then moved
+    over the target with `os.replace` -- atomic on one volume, on Windows too. A
+    failure at any point leaves the target as it was and removes the temporary
+    file. Atomic per file, not across files: a multi-file apply that dies halfway
+    leaves some files new and some old, and the reset at the top of the next
+    attempt re-copies all of them.
+    """
+    handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        # newline="\n" so the bytes on disk are the bytes the diff was rendered
+        # from. Windows text mode would translate to CRLF and make the applied
+        # file differ from the diff the human approved.
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+        if target.exists():
+            # mkstemp creates the file owner-only; keep the target's own mode.
+            shutil.copymode(target, temporary)
+        os.replace(temporary, target)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise

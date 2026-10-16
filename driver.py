@@ -63,6 +63,10 @@ ARMS = ("A", "B", "C")
 #: Model calls per run, best and worst case: Planner once (B, C), then one
 #: Implementer call per attempt, plus one Reviewer call per reviewed attempt (C).
 CALLS_PER_RUN = {"A": (1, 5), "B": (2, 6), "C": (3, 11)}
+#: The same in diff mode, where each attempt may add one repair call for edit
+#: blocks that did not apply: five more in the worst case, for every arm.
+CALLS_PER_RUN_DIFF = {"A": (1, 10), "B": (2, 11), "C": (3, 16)}
+EDIT_FORMATS = ("full", "diff")
 INFRA_CAP = 3
 #: Seconds between the starts of consecutive model calls. 12 s keeps a session
 #: at or under 5 calls a minute.
@@ -245,7 +249,8 @@ def _requests_in(log_path: Path) -> int:
 # -- one run -----------------------------------------------------------------
 
 
-def run_one(entry: dict, arm: str, repeat: int, client: Any, paths: Paths) -> tuple[dict | None, Path]:
+def run_one(entry: dict, arm: str, repeat: int, client: Any, paths: Paths,
+            edit_format: str = "full") -> tuple[dict | None, Path]:
     """Run one arm on one task and score it. Returns (row, run log path).
 
     Quota and infrastructure errors propagate for the caller to record; a
@@ -254,7 +259,7 @@ def run_one(entry: dict, arm: str, repeat: int, client: Any, paths: Paths) -> tu
     task_dir = build_task(entry, paths)
     task_id = f"arm{arm}_{make_task_id(entry['task'])}_{uuid.uuid4().hex[:6]}"
     log = (EventLog(task_id, log_dir=paths.logs) if arm == "A"
-           else ArmEventLog(task_id, arm, log_dir=paths.logs))
+           else ArmEventLog(task_id, arm, log_dir=paths.logs, edit_format=edit_format))
 
     discovered = discover_failure(task_dir, log)
     if discovered.exit_code != PYTEST_TESTS_FAILED:
@@ -270,10 +275,10 @@ def run_one(entry: dict, arm: str, repeat: int, client: Any, paths: Paths) -> tu
     try:
         if arm == "A":
             run_baseline(state, fixture_path=task_dir, client=client, event_log=log,
-                         approve=always_approve, runs_root=paths.runs)
+                         approve=always_approve, runs_root=paths.runs, edit_format=edit_format)
         else:
             run_arm(arm, state, fixture_path=task_dir, client=client, event_log=log,
-                    runs_root=paths.runs)
+                    runs_root=paths.runs, edit_format=edit_format)
     except LLMTransportError as exc:
         exc.run_log = log.path
         raise
@@ -306,8 +311,11 @@ def drive(
     client_factory: Callable[[dict, str, int], Any] | None = None,
     paths: Paths = Paths(),
     out=print,
+    edit_format: str = "full",
 ) -> int:
     check_outputs([results.parent, paths.tasks, paths.runs, paths.logs], paths.protected)
+    if edit_format not in EDIT_FORMATS:
+        raise SystemExit(f"unknown edit format {edit_format!r}; expected one of {EDIT_FORMATS}")
 
     tasks = select_tasks(json.loads(paths.manifest.read_text(encoding="utf-8")), split, task_ids)
     if client_factory is None:
@@ -319,6 +327,14 @@ def drive(
     pacer = pacer or Pacer(min_call_interval)
 
     done_rows = read_jsonl(results)
+    # One edit format per results file. Resume keys are (task, arm, repeat), so a
+    # diff run would otherwise be skipped as done because of a full row, or the two
+    # formats mixed in one table. A row with no `edit_format` predates diff mode.
+    mixed = sorted({row.get("edit_format", "full") for row in done_rows} - {edit_format})
+    if mixed:
+        raise SystemExit(f"refusing to start: {results} holds {', '.join(mixed)}-format rows and "
+                         f"this session is --edit-format {edit_format}; use a separate results file")
+    calls_per_run = CALLS_PER_RUN_DIFF if edit_format == "diff" else CALLS_PER_RUN
     done = {key_of(row) for row in done_rows}
     infra: dict[tuple, int] = {}
     for incident in read_jsonl(incidents_path(results)):
@@ -329,8 +345,8 @@ def drive(
     todo = [(t, a, r) for t, a, r in plan(tasks, arms, repeats, seed)
             if (t["task"], a, r) not in done and infra.get((t["task"], a, r), 0) < infra_cap]
     given_up = sorted(k for k, n in infra.items() if n >= infra_cap and k not in done)
-    low = sum(CALLS_PER_RUN[a][0] for _, a, _ in todo)
-    high = sum(CALLS_PER_RUN[a][1] for _, a, _ in todo)
+    low = sum(calls_per_run[a][0] for _, a, _ in todo)
+    high = sum(calls_per_run[a][1] for _, a, _ in todo)
     out(f"{len(todo)} run(s) left on the {split} split; estimated {low}-{high} model calls.")
     for k in given_up:
         out(f"  skipped {k}: {infra_cap} infrastructure errors")
@@ -340,14 +356,14 @@ def drive(
     spent = 0
     for index, (entry, arm, repeat) in enumerate(todo):
         key = (entry["task"], arm, repeat)
-        if max_calls is not None and spent + CALLS_PER_RUN[arm][1] > max_calls:
+        if max_calls is not None and spent + calls_per_run[arm][1] > max_calls:
             out(f"stopping: the next run could exceed --max-calls {max_calls} ({spent} spent). "
                 f"{len(todo) - index} run(s) left.")
             return STOPPED_EARLY
 
         try:
             client = PacedClient(client_factory(entry, arm, repeat), pacer)
-            row, run_log = run_one(entry, arm, repeat, client, paths)
+            row, run_log = run_one(entry, arm, repeat, client, paths, edit_format)
         except LLMTransportError as exc:
             wasted = _requests_in(exc.run_log)
             spent += wasted
@@ -393,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="google (GEMINI_API_KEY) or openrouter (OPENROUTER_API_KEY)")
     parser.add_argument("--task", action="append", default=[],
                         help="task id from the manifest; repeat or comma-separate to run several")
+    parser.add_argument("--edit-format", choices=EDIT_FORMATS, default="full",
+                        help="full (whole files, the default) or diff (search/replace blocks)")
     parser.add_argument("--min-call-interval", type=float, default=MIN_CALL_INTERVAL,
                         help="seconds between the starts of consecutive model calls (default 12)")
     args = parser.parse_args(argv)
@@ -407,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     return drive(split=args.split, arms=arms, repeats=args.repeats, seed=args.seed,
                  results=args.results, max_calls=args.max_calls,
                  min_call_interval=args.min_call_interval, task_ids=task_ids or None,
-                 backend=args.backend)
+                 backend=args.backend, edit_format=args.edit_format)
 
 
 if __name__ == "__main__":

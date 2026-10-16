@@ -247,6 +247,8 @@ Models are unreliable at emitting valid unified diffs — hunk headers and line 
 
 The Reviewer reads the **rendered diff**, not `edits`. Minimality is a property of the change, and the diff is the only view that shows it.
 
+**Diff mode does not reverse this; it adds a wire format in front of it.** With `--edit-format diff` the model emits search/replace blocks, and the Implementer resolves them against the baseline into the same `list[FileEdit]` with full contents before anything else sees them. `FileEdit`, `TaskState`, `CONTRACTS`, the scope check, `render_diff`, livelock, the Reviewer and `apply_edits` are unchanged. What the ruling above rejected is still rejected: the model never writes hunk headers or line offsets. See "Diff-mode edits".
+
 ### Plan
 
 ```python
@@ -624,6 +626,8 @@ It is the **only** function in the harness that writes a file the Implementer pr
 
 It raises `ValueError` if an edit resolves outside `repo_path`. That should be unreachable, since the scope check has already confined every path to `target_files`, so reaching it means either the check let something through or the plan named an escaping path. Fatal for the same reason `AgentContractError` is: a harness bug, not a task outcome, and `Status` has no value for it.
 
+**Each file is written atomically** (`_write_atomically`: a temporary file in the same directory, then `os.replace`). Added with diff mode as D14, and **it applies to both edit formats. It is a safety change, not a behaviour change**: the bytes that land are exactly the bytes `write_text(..., newline="\n")` wrote before, the call site and the single-writer rule are untouched, and full-mode results are unaffected. What it buys is that a write interrupted at any point leaves the file entirely old or entirely new, never partial, and leaves no temporary file behind. It is atomic per file, not across files; a multi-file apply that dies halfway is repaired by the reset at the top of the next attempt, as before.
+
 `tests/fixture_edits.write_edits` now delegates to it, so there is one writer in the project. What the helper still contributes is a *name for the bypass*: every use of it is a test deliberately stepping around the gate. It stays in `tests/` for that reason — a helper in `harness/` that quietly applies edits is the shape of the thing invariant 1 exists to prevent.
 
 ---
@@ -653,6 +657,7 @@ Written by the loop with `agent="harness"`, in the order they can appear:
 | `run_started` | `task_id`, `fixture_path`, `repo_path`, `max_attempts` |
 | `baseline_reset` | `repo_path` |
 | `no_edits_produced` | — |
+| `edit_apply_failed` | `failures` (diff mode only: blocks that still did not apply after the repair call) |
 | `scope_check_failed` | `paths`, `target_files` |
 | `diff_rendered` | `diff` |
 | `livelock_detected` | `diff`, `previous_diffs` (count) |
@@ -1116,7 +1121,7 @@ Three arms, run against the same targets, so each comparison varies one thing.
 | B | `harness_arms.py --arm B`: the harness without the Reviewer (a pass-through that approves without a model call): Planner, Implementer and Tester, with C's loop, livelock check, scope rules and attempt cap | built and tested with stubs; never run live |
 | C | `harness_arms.py --arm C`: the full harness: Planner, Implementer, Reviewer, Tester | built and tested with stubs; never run live |
 
-**Held identical across all three:** the model (`llm.DEFAULT_MODEL`), the Implementer's `MAX_TOKENS` and thinking level, `MAX_ATTEMPTS`, the real Tester, a baseline reset at the top of every attempt, `.git` exclusion, and the `approve` seam, auto-approved in all three.
+**Held identical across all three:** the model (`llm.DEFAULT_MODEL`), the Implementer's `MAX_TOKENS` and thinking level, `MAX_ATTEMPTS`, the real Tester, a baseline reset at the top of every attempt, `.git` exclusion, the `approve` seam (auto-approved in all three), and the edit format (`--edit-format`, one per driver session and per results file; see "Diff-mode edits").
 
 **The Implementer prompt is identical in B and C**, including its mentions of a reviewer, so B vs C measures whether the Reviewer runs with the prompt held fixed.
 
@@ -1138,6 +1143,62 @@ Nine real upstream bugs, each a small fix commit that added or changed a test. M
 python-slugify has no task: its recent fixes have 39–58k-character repos and fail only inside subtests (F9), and its older ones keep their tests in `test.py`, which pytest does not collect.
 
 **Two caveats.** Dev prompts are much larger than eval ones — schema 48.6k and xmltodict 37.4k characters of Planner message against 6–17k for every eval task — so dev results do not predict eval cost. **cfgv `2876a67` is borderline**: its test asserts a new error message (`is not a file`), so it is partly a wording change rather than a behaviour bug.
+
+---
+
+## Diff-mode edits
+
+`--edit-format full|diff`, **default `full`**, on `baseline.py` (A), `harness_arms.py` (B, C) and `driver.py`. `cli.py` does not have it: whether diff becomes the shipped default is decided by the gate below, not before it. Built offline on 2026-10-16; **not yet run against a model.**
+
+**Why.** F6 (schema, 3.6) and the 3.8 eval runs showed the same thing: a correct fix wrapped in corruption on lines the plan never touched. humps arm C (`armC_humps_2a462a7_20261016T153103Z`) had attempt 1 rejected for an un-indented line in `pascalize`, attempt 2 for `PASCAL_RE` broken by a line break plus three docstring types changed to `bool`; attempt 3 was one clean hunk. Each attempt re-emitted the whole file (~2,035 output tokens) to change one line. tokenize-rt arm A rewrote `tests/tokenize_rt_test.py` — a file arm A is shown **by path only** — three times, once into a stub that would not collect.
+
+### The decisions (D-numbers from the approved design)
+
+- **D1 — format.** Search/replace blocks as JSON: `{"edits": [{"path", "search", "replace"}]}`. Not unified diffs (the "Edits, not patches" objection stands) and not line ranges (models miscount, and numbered files would change the prompt prefix).
+- **D2 — exact match.** No whitespace normalisation, no fuzzy fallback; the livelock rule's byte equality, applied here.
+- **D3 — every search matches the original file**, spans must not overlap, all are substituted at once. Block order cannot change the result.
+- **D4 — outcomes.** 1 match: replace. 0: `no_match`, with a diagnostic-only hint if it would match with trailing whitespace or indentation ignored (reported, never applied). >1 (overlapping occurrences counted): `ambiguous`. Also `overlap`, `empty_search` (empty search on a non-empty file), `file_missing`, `path_escapes_repo` (a failure, not a crash), `unreadable`. An empty search creates a missing file or fills an empty one, and must then be that file's only block.
+- **D5 — all or nothing.** Any failure: every failure reported at once, no edit returned. Blocks with no net change are dropped; all dropped resolves to `[]`, which takes the no-edits branch.
+- **D6 — resolution lives in the Implementer.** `resolve_edits` in `implementer.py`, the precedent being `ImplementerResponse`: a wire format "unwrapped before it reaches state". It only reads, through `read_repo_file`. A path outside `target_files` but inside the repo resolves, and the loop's scope check then catches it exactly as in full mode.
+- **D7 — one repair call, not an attempt.** On a failed resolution the Implementer makes one more call: the original user message unchanged (same cached prefix) plus `<previous_edits_did_not_apply>`, which shows each failing block's kind and its search text in full and asks for the complete block list again. Same reasoning as the parse repair: no diff was produced, so `attempt_count` does not move. It is a real `llm_request` (`repair_of: "edit_apply"`), so every call count includes it.
+- **D8 — still failing after the repair: one attempt consumed**, like a scope violation. `EditsNotApplicable` propagates out of `_run`; `loop.py` (and `baseline.py`) catch it, write a `ReviewerRejection` (no third evidence type: the corrective action is "produce a different change"), log `edit_apply_failed`, and continue. Not fatal like `LLMResponseError`: a fresh sample from a reset baseline can succeed, and a fatal outcome would score as `crashed` and bias the benchmark against diff mode. The loop catching an agent's exception is new; it is the only such catch.
+- **D9 — confirmed.** The evidence reason echoes each failing block's first search line, capped at 120 characters. A deliberate small widening of "the Implementer retries blind to its own last attempt": without it "block 2 did not match" names nothing the model can act on.
+- **D10 — `edit_apply_failed` is an outcome event** (`cli.OUTCOME_EVENTS`), so a retry-limit halt still has exactly `MAX_ATTEMPTS` ledger rows.
+- **D11 — absent means full.** `edit_format` is stamped into `run_started` and the Implementer's `llm_request` only in diff mode; every earlier log reads as full without migration, and full-mode logs keep their shape.
+- **D12 — arm A gets the switch too.** Compare within a format (A-diff vs C-diff), never across. The driver refuses to append to a results file whose rows are in another format (a row without the key is full), so diff results go to their own file, e.g. `eval_38_diff.jsonl`. Diff worst cases: A (1, 10), B (2, 11), C (3, 16) calls (`CALLS_PER_RUN_DIFF`).
+- **D13 — a known confound, recorded rather than removed.** Diff mode cannot edit a file the model was never shown, and arm A sees test files by path only, so A's blind test rewrites become inexpressible. That is a real property of the format but not a token effect. The baseline's diff prompt states only the neutral format rule (`DIFF_EDIT_RULES`, shared word for word with the Implementer) and says nothing about test files; the scorer's `flags.test_path_apply_failures` keeps the effect visible.
+- **D14 — atomic per-file writes in `apply_edits`, both formats.** A safety change, not a behaviour change; see "Apply".
+- **D15 — `MAX_TOKENS` stays 24000, `THINKING_LEVEL` stays `LOW`.** Tokens are billed by use, so a lower ceiling saves nothing, and changing it would add a second variable to the comparison. Revisit once diff-mode maximums are measured.
+- **D16 — the gate is staged and provisional;** see below.
+
+**Full mode is byte-identical.** `SYSTEM_PROMPT`, `RESET_NOTICE` and the baseline's `SYSTEM_PROMPT` are pinned by sha256 in `tests/test_edit_resolution.py` to the values at HEAD before this change. Diff mode has its own `SYSTEM_PROMPT_DIFF`, `RESET_NOTICE_DIFF` ("Send your edit blocks again, matched against the original contents shown above") and baseline `SYSTEM_PROMPT_DIFF`.
+
+**The schema** (`DiffImplementerResponse` / `SearchReplace`) has the same structure as `ImplementerResponse`: one `$defs` entry, one `$ref`, `additionalProperties: false`, every field a required string. No unions, defaults or patterns, so it uses no schema feature the full-mode call has not already used on both backends, `strict: true` on OpenRouter included. A test asserts the keyword sets are equal.
+
+### Events (diff mode)
+
+| Event | Agent | Payload |
+| --- | --- | --- |
+| `llm_request` | implementer / baseline | adds `edit_format: "diff"`; adds `repair_of: "edit_apply"` on the repair call |
+| `edits_resolved` | implementer / baseline | `stage` (`initial`/`repair`), `edits`: the raw blocks that resolved |
+| `edit_resolution_failed` | implementer / baseline | `stage`, `failures` (`index`, `path`, `kind`, `match_count`, `hint`, `search`), `edits`: the raw blocks |
+| `edit_apply_failed` | harness | `failures` — the routing outcome, once per consumed attempt |
+
+`agent_produced` is unchanged: it carries the resolved full-file `FileEdit`s. **Replay** is baseline + `edits_resolved.edits` → `resolve_edits` → the same `FileEdit`s and the same `render_diff`; `TestReplay` asserts it. Scorer rows add `edit_format`, `edit_apply_failures`, `edit_repairs` and `flags.test_path_apply_failures`.
+
+### The gate — staged, provisional, set before any run
+
+Three stages, each run only if the one before it passed. Nothing below has been run.
+
+1. **Smoke test** — humps `2a462a7`, **arm C**, `--edit-format diff`, **one run** (3 calls if all goes well, 16 worst case). Passes if: it resolves; the first Implementer call applies without a repair; Implementer output is well under the ~2,035 tokens per call that full mode spent here; `diff_rendered` holds only the `SPLIT_RE` hunk. A failure here stops everything until it is understood.
+2. **Provisional gate** — **tokenize-rt `cb7836b` plus three other eval tasks, repeat 0 only, arms A, B and C**, diff mode, its own results file, compared against the same cells of `eval_38.jsonl`. Provisional because n=1 per cell: a single bad sample can look like a regression, and the full-split gate is what decides. Choose the three other tasks before the run, and record which.
+   - **Keep provisionally** if all hold: no task resolved in full mode is lost (one loss → re-run that cell once before judging); Implementer/baseline output tokens per run fall by ≥ 50% at the median; edits still unapplicable after the repair are ≤ 10% of attempts and the repair rescues at least half of its failures; total requests per resolved run are no higher than full mode's (humps C was 7); no new `crashed` or `escalated_broken_suite`.
+   - **Drop** if a previously resolved task fails twice, unapplicable edits exceed 25% of attempts, or total tokens per resolved run (input + output + thinking) are not lower.
+   - **In between** (real savings, 10–25% unapplicable): keep the switch off by default and try whitespace-tolerant matching as a separate switch.
+   - Report tokenize-rt separately: every arm fails it in full mode, and diff mode removes arm A's blind test rewrites (D13), so a change there is not a token effect.
+3. **Full-split gate** — the whole eval split, all arms, the same repeats as `eval_38.jsonl`, with the stage 2 criteria. **Runs only after OpenRouter credits are added.** Until then any "keep" is provisional, and `cli.py` stays full-only.
+
+**Cost.** `prices.json` has `google/gemini-3.8-flash` from the OpenRouter listing dated 2026-10-16 (a **promotional** price): input $0.75, cached input $0.075 and output $3.75 per 1M tokens. **`thinking_per_mtok` is null**: the listing as given did not state it, so it was not invented. Until it is filled in, `cost_usd` stays null for any run with thinking tokens, and the gate compares tokens rather than dollars. A promotional price may not hold, so dollar figures need their date next to them.
 
 ---
 

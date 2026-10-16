@@ -369,10 +369,11 @@ def terminal_approval(diff: str) -> bool:
 # fires before the next attempt's clear at step B.
 
 
-#: The four branch events, one of which every continuing attempt writes exactly
+#: The five branch events, one of which every continuing attempt writes exactly
 #: once. A retry-limit halt therefore has exactly MAX_ATTEMPTS of them.
 OUTCOME_EVENTS = (
     "no_edits_produced",
+    "edit_apply_failed",
     "scope_check_failed",
     "review_rejected",
     "test_failed",
@@ -421,6 +422,12 @@ def _outcome_detail(event: str, payload: dict) -> str:
     """
     if event == "scope_check_failed":
         return ", ".join(payload.get("paths", []))
+    if event == "edit_apply_failed":
+        failures = payload.get("failures", [])
+        if not failures:
+            return ""
+        more = f" (+{len(failures) - 1} more)" if len(failures) > 1 else ""
+        return f"{failures[0].get('path')}: {failures[0].get('kind')}{more}"
     if event == "review_rejected":
         return _first_line(payload.get("reason", ""))
     if event == "test_failed":

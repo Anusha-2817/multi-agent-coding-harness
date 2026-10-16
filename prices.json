@@ -1,12 +1,20 @@
 {
   "source": null,
   "date": null,
-  "note": "USD per million tokens, per model id as it appears in llm_response.model. Every price is null until filled in from the provider's pricing page; cost is reported as null while any price a run needs is null. input_per_mtok is charged on input_tokens minus cache_read_input_tokens.",
+  "note": "USD per million tokens, per model id as it appears in llm_response.model. Every price is null until filled in from the provider's pricing page; cost is reported as null while any price a run needs is null. input_per_mtok is charged on input_tokens minus cache_read_input_tokens. Each filled entry carries its own source and date.",
   "models": {
     "gemini-3.6-flash": {
       "input_per_mtok": null,
       "cached_input_per_mtok": null,
       "output_per_mtok": null,
+      "thinking_per_mtok": null
+    },
+    "google/gemini-3.8-flash": {
+      "source": "OpenRouter listing, promotional price",
+      "date": "2026-10-16",
+      "input_per_mtok": 0.75,
+      "cached_input_per_mtok": 0.075,
+      "output_per_mtok": 3.75,
       "thinking_per_mtok": null
     }
   }

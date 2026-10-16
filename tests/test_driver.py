@@ -457,3 +457,75 @@ class TestSafety:
         names = {p.as_posix().split("experiments/")[-1] for p in Paths().protected}
         assert names == {"schema", "xmltodict", "inflection", "git_intact/python-slugify", "bench/hidden"}
         assert driver.BENCH.parent == driver.EXPERIMENTS
+
+
+# -- diff mode -------------------------------------------------------------------
+
+from harness.agents.implementer import DiffImplementerResponse, SearchReplace  # noqa: E402
+
+
+class DiffStubClient(StubClient):
+    """`StubClient`, with the Implementer and the baseline answering in edit blocks."""
+
+    def complete_structured(self, *, system, user, schema, max_tokens, thinking_level=None):
+        if schema is DiffImplementerResponse:
+            block = SearchReplace(path=DISCOUNTS, search=BUG, replace=FIX)
+            return LLMResult(value=DiffImplementerResponse(edits=[block]), model=self.model,
+                             stop_reason="STOP", parse_attempts=1,
+                             usage={"input_tokens": 10, "output_tokens": 2})
+        return super().complete_structured(system=system, user=user, schema=schema,
+                                           max_tokens=max_tokens, thinking_level=thinking_level)
+
+
+class TestEditFormat:
+    def test_a_diff_session_runs_every_arm_and_stamps_every_row(self, bench):
+        _, results = bench
+        code, lines = go(bench, factory=lambda task, arm, repeat: DiffStubClient(), edit_format="diff")
+
+        assert code == 0
+        assert lines[0] == "3 run(s) left on the dev split; estimated 6-37 model calls."
+        written = rows(results)
+        assert len(written) == 3
+        assert all(r["resolved"] and r["edit_format"] == "diff" for r in written)
+        assert all(r["edit_apply_failures"] == 0 and r["edit_repairs"] == 0 for r in written)
+
+    def test_full_rows_say_full(self, bench):
+        _, results = bench
+        go(bench, arms=["A"])
+
+        assert [r["edit_format"] for r in rows(results)] == ["full"]
+
+    def test_one_results_file_never_mixes_formats(self, bench):
+        _, results = bench
+        go(bench, arms=["A"])
+
+        with pytest.raises(SystemExit, match="full-format rows"):
+            go(bench, arms=["A"], edit_format="diff")
+        assert len(rows(results)) == 1
+
+    def test_a_row_from_before_diff_mode_counts_as_full(self, bench):
+        _, results = bench
+        results.parent.mkdir(parents=True, exist_ok=True)
+        results.write_text(json.dumps({"task": "x", "arm": "A", "repeat": 0}) + "\n", encoding="utf-8")
+
+        with pytest.raises(SystemExit, match="full-format rows"):
+            go(bench, arms=["A"], edit_format="diff")
+
+    def test_max_calls_uses_the_diff_worst_case(self, bench):
+        """Full A's worst case is 5, so two would fit in 10; diff A's is 10."""
+        _, results = bench
+        code, _ = go(bench, factory=lambda task, arm, repeat: DiffStubClient(),
+                     arms=["A"], repeats=2, max_calls=10, edit_format="diff")
+
+        assert code == STOPPED_EARLY
+        assert len(rows(results)) == 1  # 1 spent; another diff A could reach 11
+
+    def test_the_flag_defaults_to_full(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(driver, "drive", lambda **kw: seen.update(kw) or 0)
+        main(["--split", "dev"])
+        assert seen["edit_format"] == "full"
+        main(["--split", "dev", "--edit-format", "diff"])
+        assert seen["edit_format"] == "diff"
+        with pytest.raises(SystemExit):
+            main(["--split", "dev", "--edit-format", "patch"])

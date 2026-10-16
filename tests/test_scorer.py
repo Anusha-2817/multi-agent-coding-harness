@@ -170,12 +170,34 @@ class TestCrashes:
 
 
 class TestCost:
-    def test_shipped_prices_are_null_so_cost_is_null(self, bench):
+    def test_the_default_models_shipped_prices_are_null_so_cost_is_null(self, bench):
+        from harness.llm import DEFAULT_MODEL
+
         shipped = json.loads((Path(__file__).resolve().parent.parent / "prices.json").read_text())
-        assert shipped["source"] is None and shipped["date"] is None
-        assert all(rate is None for model in shipped["models"].values() for rate in model.values())
+        assert all(rate is None for rate in shipped["models"][DEFAULT_MODEL].values())
 
         assert score(bench, run_a(bench, [fixing_edits()]))["cost_usd"] is None
+
+    def test_the_shipped_38_price_is_the_dated_openrouter_listing(self):
+        shipped = json.loads((Path(__file__).resolve().parent.parent / "prices.json").read_text())
+        entry = shipped["models"]["google/gemini-3.8-flash"]
+
+        assert entry["date"] == "2026-10-16" and "promotional" in entry["source"]
+        assert (entry["input_per_mtok"], entry["cached_input_per_mtok"], entry["output_per_mtok"]) == (
+            0.75, 0.075, 3.75)
+        # Not given with the listing, so not invented: a run with thinking tokens
+        # still costs null until this is filled in.
+        assert entry["thinking_per_mtok"] is None
+
+    def test_a_38_run_without_thinking_tokens_gets_a_cost(self):
+        from scorer import cost, load_prices
+
+        prices = load_prices(Path(__file__).resolve().parent.parent / "prices.json")
+        events = [{"event": "llm_response", "payload": {"model": "google/gemini-3.8-flash", "usage": {
+            "input_tokens": 1_000_000, "cache_read_input_tokens": 0, "output_tokens": 1_000_000,
+            "thinking_tokens": 0}}}]
+
+        assert cost(events, prices) == pytest.approx(0.75 + 3.75)
 
     def test_filled_prices_give_a_cost(self, bench, tmp_path):
         from harness.llm import DEFAULT_MODEL
@@ -189,3 +211,32 @@ class TestCost:
 
         # One call: 100 input, 50 output, 20 thinking (test_baseline.USAGE).
         assert row["cost_usd"] == pytest.approx((100 * 1.0 + 50 * 2.0 + 20 * 3.0) / 1_000_000)
+
+
+class TestDiffModeFields:
+    def test_a_full_run_scores_as_full_with_nothing_to_count(self, bench):
+        row = score(bench, run_a(bench, [fixing_edits()]))
+
+        assert row["edit_format"] == "full"
+        assert (row["edit_apply_failures"], row["edit_repairs"]) == (0, 0)
+        assert row["flags"]["test_path_apply_failures"] == []
+
+    def test_a_diff_run_counts_repairs_failures_and_blind_test_edits(self, bench):
+        from test_baseline import BLIND_TEST_BLOCK, FIX_BLOCK, DiffScriptedClient
+
+        root, task_dir, _, _ = bench
+        log = EventLog(TASK_ID, log_dir=root / "logs")
+        state = TaskState(task_id=TASK_ID, repo_path=prepare_run_dir(TASK_ID, task_dir, root / "runs"),
+                          task_description="Fix the failing test.", failure_input=TARGET)
+        run_baseline(state, fixture_path=task_dir, edit_format="diff", event_log=log,
+                     client=DiffScriptedClient([BLIND_TEST_BLOCK, BLIND_TEST_BLOCK, BLIND_TEST_BLOCK, FIX_BLOCK]),
+                     approve=lambda diff: True, runs_root=root / "runs")
+
+        row = score(bench, log)
+
+        assert row["resolved"] is True and row["attempts"] == 2
+        assert row["edit_format"] == "diff"
+        assert row["edit_apply_failures"] == 1
+        assert row["edit_repairs"] == 2  # one per attempt, whether or not it rescued anything
+        assert row["totals"]["requests"] == 4  # the repair calls are counted as calls
+        assert row["flags"]["test_path_apply_failures"] == ["tests/test_orders.py"]
