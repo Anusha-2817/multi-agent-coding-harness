@@ -1,0 +1,99 @@
+tests/test_probe_replanner.py
+  s_8c30620b0e047d::t_19a663bf389b77 1-33,35-56,58-64,66-70,72-87,89-93,95-105,107-120,122-148,158-175
+  s_8c30620b0e047d::t_3647876c4cc228 34,57,65,71,88,94,106,121
+  s_8c30620b0e047d::t_cadd88c39fc765 149-157
+tests/test_scorer.py
+  s_8c30620b0e047d::t_99ae07e4219a88 188-201
+probe_replanner.py
+  s_8c30620b0e047d::t_b1c14c90cf5a13 133,145,147-150,153-154
+  s_8c30620b0e047d::t_cf8150402f6628 193-195
+  s_8c30620b0e047d::t_1da162fc00d98b 199-203
+  s_8c30620b0e047d::t_a6d94b026aee29 52,315
+  s_8c30620b0e047d::t_1ac367a0f9c34b 1-51,53-132,134-144,146,151-152,155-192,196-198,204-314,316-333
+prices.json
+  s_8c30620b0e047d::t_5310937cce310b 18-20
+CLAUDE.md
+  s_8c30620b0e047d::t_cd0f8c11648197 29
+  s_8c30620b0e047d::t_9c3d240d3950e9 507
+  s_8c30620b0e047d::t_ca490ed026753e 1007
+  s_8c30620b0e047d::t_b11f1e9cd6675d 1133
+  s_8c30620b0e047d::t_03cc30ba1ac08d 1311
+  s_8c30620b0e047d::t_fce4c77d9007ef 1340-1341
+  s_8c30620b0e047d::t_bb0ca98a8bf68a 1001-1006,1008-1010
+  s_8c30620b0e047d::t_f96f3a3711ab76 1160-1198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "bc5c5aafbea130bb8c5025cb9bd18b156c701fe2",
+  "branch": "diff-edits",
+  "prompts": {
+    "s_8c30620b0e047d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bfaafbf2-ea1f-40fc-ae4e-7a54601d48c8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:ee72402ebca6212134bf40d398e1e85496090f706e04c0317800dbc9fc8aaaa5",
+      "total_additions": 610,
+      "total_deletions": 36,
+      "accepted_lines": 580,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_8c30620b0e047d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bfaafbf2-ea1f-40fc-ae4e-7a54601d48c8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:ee72402ebca6212134bf40d398e1e85496090f706e04c0317800dbc9fc8aaaa5",
+      "stats": {
+        "total_additions": 610,
+        "total_deletions": 36,
+        "accepted_lines": 580,
+        "overriden_lines": 0,
+        "files": {
+          "CLAUDE.md": {
+            "total_additions": 56,
+            "total_deletions": 3,
+            "accepted_lines": 55,
+            "overriden_lines": 0
+          },
+          "prices.json": {
+            "total_additions": 3,
+            "total_deletions": 1,
+            "accepted_lines": 3,
+            "overriden_lines": 0
+          },
+          "probe_replanner.py": {
+            "total_additions": 354,
+            "total_deletions": 21,
+            "accepted_lines": 333,
+            "overriden_lines": 0
+          },
+          "tests/test_probe_replanner.py": {
+            "total_additions": 183,
+            "total_deletions": 8,
+            "accepted_lines": 175,
+            "overriden_lines": 0
+          },
+          "tests/test_scorer.py": {
+            "total_additions": 14,
+            "total_deletions": 3,
+            "accepted_lines": 14,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
