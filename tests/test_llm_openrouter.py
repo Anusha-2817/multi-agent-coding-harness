@@ -26,7 +26,7 @@ USAGE = {"prompt_tokens": 1000, "completion_tokens": 300,
          "completion_tokens_details": {"reasoning_tokens": 200}}
 
 
-def ok(content=PLAN_JSON, finish="stop", native="STOP", usage=USAGE, model="google/gemini-3.6-flash-001"):
+def ok(content=PLAN_JSON, finish="stop", native="STOP", usage=USAGE, model="google/gemini-3.8-flash-20260902"):
     return httpx.Response(200, json={"model": model, "usage": usage, "choices": [
         {"message": {"role": "assistant", "content": content},
          "finish_reason": finish, "native_finish_reason": native}]})
@@ -73,7 +73,7 @@ class TestRequest:
         request, body = api.requests[0], api.body()
         assert str(request.url) == URL
         assert request.headers["authorization"] == f"Bearer {KEY}"
-        assert body["model"] == MODEL == "google/gemini-3.6-flash"
+        assert body["model"] == MODEL == "google/gemini-3.8-flash"
         assert body["provider"] == PROVIDER == {"order": ["google-ai-studio"], "allow_fallbacks": False,
                                                 "require_parameters": True}
         assert body["messages"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "usr"}]
@@ -99,7 +99,7 @@ class TestResult:
 
         assert result.value == Plan.model_validate_json(PLAN_JSON)
         assert result.log_payload() == {
-            "model": "google/gemini-3.6-flash-001",  # what the response reports
+            "model": "google/gemini-3.8-flash-20260902",  # what the response reports
             "stop_reason": "STOP",
             "parse_attempts": 1,
             "usage": {"input_tokens": 1000, "output_tokens": 100, "cache_read_input_tokens": 50,

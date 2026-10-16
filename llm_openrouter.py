@@ -9,10 +9,22 @@ same error types.
 validation (`_validate`), the repair prompt, the error classes, `LLMResult`, and
 the refusal finish reasons. Only the transport differs.
 
-**Provider pinning.** The model is `google/gemini-3.6-flash`, routed only to
+**Provider pinning.** The model is `google/gemini-3.8-flash`, routed only to
 Google AI Studio (`order=["google-ai-studio"]`, `allow_fallbacks=False`), the
 same service the Google backend calls. `require_parameters=True` refuses any
 provider that would silently drop `response_format` or `reasoning`.
+
+Re-checked for 3.8 against OpenRouter's public endpoint listing on 2026-10-16,
+not carried over from 3.6. The model has seven endpoints: Google AI Studio
+(`google-ai-studio`, plus `/flex` and `/priority` service tiers) and Google
+Vertex (`google-vertex/global`, `/us`, plus `/global/flex` and `/global/priority`).
+All seven list `response_format` and `reasoning`. AI Studio is kept because it
+is the service the Google backend calls, and its plain tag is the standard
+tier: flex is half price but a lower-priority tier, priority is 1.8x the price,
+and Vertex is a different service with its own regions. Whether the bare slug
+`google-ai-studio` matches only the standard endpoint, or also `/flex` and
+`/priority`, is not documented in the listing and has not been checked with a
+call.
 
 **`thinking_level` -> `reasoning.effort`**, lower-cased: MINIMAL -> "minimal",
 LOW -> "low", MEDIUM -> "medium", HIGH -> "high"; None sends no `reasoning` field,
@@ -65,7 +77,7 @@ from harness.llm import (
 )
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "google/gemini-3.6-flash"
+MODEL = "google/gemini-3.8-flash"
 PROVIDER = {"order": ["google-ai-studio"], "allow_fallbacks": False, "require_parameters": True}
 KEY_ENV = "OPENROUTER_API_KEY"
 UNAUTHORIZED = 401
