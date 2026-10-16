@@ -387,9 +387,12 @@ control arm with the evidence withheld; it is built and deliberately unspent.
 ### What is still unmeasured
 
 Neither probe measures the **routing between** the halves — that a rejection becomes evidence,
-survives the reset, and arrives in the Implementer's next prompt. That is covered by tests with
-stubs and has never run end-to-end against real models, because no real run has ever taken a
-retry. Every fixture built to force one was rescued by the Planner instead.
+survives the reset, and arrives in the Implementer's next prompt. That routing is covered by
+tests with stubs. Real runs have now taken retries: in the benchmark, the full harness (arm C)
+needed 2 to 3 attempts on several tasks, and its tokenize-rt runs reached the retry limit, so the
+retry path has run against a real model. What no one has yet checked is, attempt by attempt, that
+the rejection text appears in the next Implementer prompt. Before the benchmark, every fixture
+built to force a retry was rescued by the Planner instead.
 
 ## Benchmark (in progress)
 
