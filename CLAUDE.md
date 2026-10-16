@@ -2166,6 +2166,23 @@ Found during the task-set pre-checks, not in a run. **Status: not fixed. Gate: a
 
 The benchmark task set avoids every subtest-dependent candidate, so it does not hit this.
 
+### F10 — tokenize-rt, arm C: the Planner targeted only the test file, and five attempts could not recover
+
+`experiments/bench/logs/armC_tokenize-rt_cb7836b_20261015T094833Z_95e648.jsonl`, scored in `experiments/bench/results/eval.jsonl`. **`escalated_retry_limit`, 5 of 5 attempts, 11 calls, not resolved.** Model reported: `gemini-3.6-flash` on every call. Four earlier arm C attempts on this task ended after one request each, as infrastructure incidents (one 429, three 503s); they are not scored.
+
+**Proved, from the log and the score row:**
+- The plan's `target_files` is **only `tests/tokenize_rt_test.py`**. Its summary is to *update* `test_src_to_tokens_fstring_with_escapes` to match the 3.12+ tokenization, and its first constraint is "No file other than tests/tokenize_rt_test.py is modified."
+- The Reviewer **approved attempts 1, 2 and 4** and **rejected 3 and 5**. Attempt 3 for wrong token names in the edited test (`UNIMPORTANT_WS` instead of `FSTRING_MIDDLE`), attempt 5 for changes to two other tests the plan did not name.
+- The Tester **failed after attempts 1, 2 and 4**, each time on the target `test_src_to_tokens_fstring_with_escapes` alone. Every applied edit was to `tests/tokenize_rt_test.py`.
+- The run ended `escalated_retry_limit` with **11 calls** (Planner 1, Implementer 5, Reviewer 5).
+- The upstream fix (`cb7836b`) is **5 lines in `tokenize_rt.py`**; the run changed **0 source lines**. With the hidden test restored, the target still fails (`targets_pass: false`, no regressions). The run directory ended as the task baseline, because attempt 5 was rejected before apply.
+
+**Unverified:**
+- **Why the Planner chose the test file.** The failure output shows a mismatch between expected and actual tokens. Reading the expected list as the stale side is one possible cause; nothing in the log says which reading it took, or why.
+- **Whether a re-plan would have helped.** v1 never replans, so every retry re-read the same test-only plan. Under "Fixture design: the recoverability constraint", a wrong plan is unrecoverable by construction, which matches what happened, but no run has tested a second plan.
+
+**Status: recorded, nothing built.** This is the **first candidate for the parked re-plan gate** (routing back to the Planner, behind the scope fence as a v2 item). It is not yet a reason to build it: one run, one task, one model. It is also the **first observed instance** of "A known hole: a plan that targets a test file", whose named fix is a `Plan` validator rejecting test paths in `target_files`. That trigger has now fired once; the decision is still open.
+
 ### Phase 5, complete as recorded
 
 **All three probe passes are complete.** The Reviewer probe scored **8/8**, the Implementer probe **5/5**, and the conditional end-to-end `fixture_repo_3` run went green on attempt 1. Both halves of retry-on-failure are measured directly; see "What the retry mechanism proved, together".
