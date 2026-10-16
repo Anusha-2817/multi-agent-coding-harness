@@ -1,0 +1,207 @@
+tests/test_edit_resolution.py
+  s_c7c74edf33c24d::t_92fca13e9d12a2 1-274,282-474,478-570
+  s_c7c74edf33c24d::t_ee02b064e87193 275-281
+  s_c7c74edf33c24d::t_f1e86ecf1aba6b 475-477
+baseline.py
+  s_c7c74edf33c24d::t_244efdf63d0854 164-165,173
+  s_c7c74edf33c24d::t_8ac4c9f99a2e7f 189-195,197-222
+  s_c7c74edf33c24d::t_cc6b80ca12da46 306,334
+  s_c7c74edf33c24d::t_97d7e544fe3b1b 63,261-290
+  s_c7c74edf33c24d::t_f3122e9e3ca44a 143,145-153
+  s_c7c74edf33c24d::t_8005eef3d84ba3 49-50,53,56
+  s_c7c74edf33c24d::t_48d5b7a1406820 91-110,118,131
+driver.py
+  s_c7c74edf33c24d::t_47a52869ae2be1 66-69,252-253,262,278,281,314,317-318,330-337,348-349,359,366,412-413,428
+prices.json
+  s_c7c74edf33c24d::t_7dbb34c8e8182d 4,11-17
+tests/test_baseline.py
+  s_c7c74edf33c24d::t_41717380791db7 179-271
+tests/test_scorer.py
+  s_c7c74edf33c24d::t_6324517dfdeaab 173-175,177,181-200
+  s_c7c74edf33c24d::t_0ab6cc20de5a65 214-242
+tests/test_harness_arms.py
+  s_c7c74edf33c24d::t_41717380791db7 178-239
+CLAUDE.md
+  s_c7c74edf33c24d::t_434fd47ebcb43b 1149-1204
+  s_c7c74edf33c24d::t_e1e7973bdfa761 1124
+  s_c7c74edf33c24d::t_0b9958076369b1 250-251
+  s_c7c74edf33c24d::t_f2c5de7a83fa62 629-630
+  s_c7c74edf33c24d::t_c21c2258350fee 660
+tests/test_loop.py
+  s_c7c74edf33c24d::t_667a6388f66f18 42-43,924-1006
+harness/workspace.py
+  s_c7c74edf33c24d::t_f8f19127855f24 205,209-236
+  s_c7c74edf33c24d::t_c71ac7ca9dfb52 18,20
+  s_c7c74edf33c24d::t_7023e1ed8f676d 180-182
+tests/test_driver.py
+  s_c7c74edf33c24d::t_0ab6cc20de5a65 460-531
+harness/agents/implementer.py
+  s_c7c74edf33c24d::t_4220a4d686bb7b 30-34,41-48
+  s_c7c74edf33c24d::t_60db1bf9d17abb 85-113
+  s_c7c74edf33c24d::t_4e0550e58ec7ee 317
+  s_c7c74edf33c24d::t_3871b4698212f4 308
+  s_c7c74edf33c24d::t_69dd0ac148b995 283-285,287,289,291,295
+  s_c7c74edf33c24d::t_7e92b037477b08 329
+  s_c7c74edf33c24d::t_b36ba9505b33ea 259
+  s_c7c74edf33c24d::t_2921f40477b88b 341-343,351-353,357,361-665,667-672,676-678,681,690-706,716
+  s_c7c74edf33c24d::t_16aa43eafc8f37 146-197,207-216
+harness/loop.py
+  s_c7c74edf33c24d::t_66c65a0d8f9fa8 182-195
+  s_c7c74edf33c24d::t_2f9791c4632eb9 34
+tests/test_cli.py
+  s_c7c74edf33c24d::t_0ab6cc20de5a65 562-567
+cli.py
+  s_c7c74edf33c24d::t_47a52869ae2be1 376,425-430
+  s_c7c74edf33c24d::t_4fc5768405d07f 372
+harness_arms.py
+  s_c7c74edf33c24d::t_cc6b80ca12da46 30,67-70,73-75,78,82-85,101,103-107,117,131,141,153-154
+scorer.py
+  s_c7c74edf33c24d::t_47a52869ae2be1 104-107,117,222-225,276-284
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "2.2.0",
+  "base_commit_sha": "21a499c386b9b073baba8bb86fe5601631ec4022",
+  "branch": "diff-edits",
+  "prompts": {
+    "s_c7c74edf33c24d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85933b5d-c0ee-4f1d-90f4-a4023c5bad7b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:23969fd08d1926da8e3ed7c2686f0fa4658b8432d8f91e678e0ba5cf44990baf",
+      "total_additions": 1749,
+      "total_deletions": 118,
+      "accepted_lines": 4020,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_14a5587cb86879": {
+      "author": "Jahnavi Anusha <shanmukharj1343@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_c7c74edf33c24d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85933b5d-c0ee-4f1d-90f4-a4023c5bad7b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jahnavi Anusha <shanmukharj1343@gmail.com>",
+      "messages_url": "cas:23969fd08d1926da8e3ed7c2686f0fa4658b8432d8f91e678e0ba5cf44990baf",
+      "stats": {
+        "total_additions": 1749,
+        "total_deletions": 118,
+        "accepted_lines": 4020,
+        "overriden_lines": 0,
+        "files": {
+          "CLAUDE.md": {
+            "total_additions": 62,
+            "total_deletions": 1,
+            "accepted_lines": 2341,
+            "overriden_lines": 0
+          },
+          "baseline.py": {
+            "total_additions": 147,
+            "total_deletions": 71,
+            "accepted_lines": 143,
+            "overriden_lines": 0
+          },
+          "cli.py": {
+            "total_additions": 8,
+            "total_deletions": 1,
+            "accepted_lines": 8,
+            "overriden_lines": 0
+          },
+          "driver.py": {
+            "total_additions": 27,
+            "total_deletions": 9,
+            "accepted_lines": 27,
+            "overriden_lines": 0
+          },
+          "harness/agents/implementer.py": {
+            "total_additions": 456,
+            "total_deletions": 13,
+            "accepted_lines": 456,
+            "overriden_lines": 0
+          },
+          "harness/loop.py": {
+            "total_additions": 15,
+            "total_deletions": 1,
+            "accepted_lines": 15,
+            "overriden_lines": 0
+          },
+          "harness/workspace.py": {
+            "total_additions": 34,
+            "total_deletions": 7,
+            "accepted_lines": 34,
+            "overriden_lines": 0
+          },
+          "harness_arms.py": {
+            "total_additions": 24,
+            "total_deletions": 7,
+            "accepted_lines": 24,
+            "overriden_lines": 0
+          },
+          "prices.json": {
+            "total_additions": 9,
+            "total_deletions": 1,
+            "accepted_lines": 9,
+            "overriden_lines": 0
+          },
+          "scorer.py": {
+            "total_additions": 21,
+            "total_deletions": 0,
+            "accepted_lines": 21,
+            "overriden_lines": 0
+          },
+          "tests/test_baseline.py": {
+            "total_additions": 93,
+            "total_deletions": 0,
+            "accepted_lines": 93,
+            "overriden_lines": 0
+          },
+          "tests/test_cli.py": {
+            "total_additions": 6,
+            "total_deletions": 0,
+            "accepted_lines": 6,
+            "overriden_lines": 0
+          },
+          "tests/test_driver.py": {
+            "total_additions": 72,
+            "total_deletions": 0,
+            "accepted_lines": 72,
+            "overriden_lines": 0
+          },
+          "tests/test_edit_resolution.py": {
+            "total_additions": 574,
+            "total_deletions": 4,
+            "accepted_lines": 570,
+            "overriden_lines": 0
+          },
+          "tests/test_harness_arms.py": {
+            "total_additions": 62,
+            "total_deletions": 0,
+            "accepted_lines": 62,
+            "overriden_lines": 0
+          },
+          "tests/test_loop.py": {
+            "total_additions": 85,
+            "total_deletions": 0,
+            "accepted_lines": 85,
+            "overriden_lines": 0
+          },
+          "tests/test_scorer.py": {
+            "total_additions": 54,
+            "total_deletions": 3,
+            "accepted_lines": 54,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}
