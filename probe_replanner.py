@@ -33,6 +33,23 @@ first. The flags are a first read, not the verdict -- every plan is printed in
 full so a human can overrule them. Gate (CLAUDE.md, "Arm D"): >= 6 of 12 PASS
 builds D; < 3 stops it; in between is a judgment call.
 
+**A paid call is never lost.** Each finished sample -- plan, grade, usage -- is
+appended to `--results` (default `probe_replanner_results.jsonl`) the moment it
+completes, and a rerun skips every (run, sample) already there. A row records
+a hash of the exact prompt it was asked; a rerun against a file whose rows were
+asked a different prompt refuses to start rather than mix the two.
+
+**Truncation is an outcome, not a crash.** The first live run died on sample 3
+with `LLMTruncatedError` at the Planner's 16,000-token budget (OpenRouter folds
+thinking into output: 3,110 and 4,181 output tokens on samples 1-2, thinking
+reported as 0). The budget is now the Implementer's 24,000, thinking stays at
+the Planner's level, and a sample that still truncates is recorded as
+TRUNCATED and the probe moves on. TRUNCATED is done -- it is skipped on a rerun
+like any other row; delete its line to re-ask it. It **counts against the
+gate**: the denominator stays the planned 12 and a TRUNCATED sample is not a
+PASS, because in arm D a truncated re-plan is a crashed run, not a recovered
+one.
+
 Like the other probes it lives at the repo root, not in `tests/`: it makes real
 calls (`OPENROUTER_API_KEY`, the backend the 3.8 runs used) and the harness
 suite makes none. Calls are paced at the driver's interval.
@@ -41,6 +58,7 @@ suite makes none. Calls are paced at the driver's interval.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -48,14 +66,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import indent
+from typing import Any
 
 from cli import DEFAULT_DESCRIPTION
 from driver import MIN_CALL_INTERVAL, PacedClient, Pacer
-from harness.agents.planner import MAX_TOKENS, SYSTEM_PROMPT, THINKING_LEVEL, render_user_message
+from harness.agents.implementer import MAX_TOKENS as IMPLEMENTER_MAX_TOKENS
+from harness.agents.planner import SYSTEM_PROMPT, THINKING_LEVEL, render_user_message
 from harness.agents.reviewer import render_plan
 from harness.agents.tester import tester_failure_from
 from harness.events import EventLog
-from harness.llm import LLMError
+from harness.llm import LLMError, LLMTruncatedError
 from harness.loop import MAX_ATTEMPTS
 from harness.state import Plan, TesterFailure, TestResult
 
@@ -69,6 +89,11 @@ RUN_IDS = (
     "armC_tokenize-rt_cb7836b_20261016T191958Z_d73bc3",
 )
 SAMPLES = 3
+#: The Implementer's budget, not the Planner's 16,000, which truncated a live
+#: sample. Thinking shares it. Arm D's re-planner, if built, takes the same.
+MAX_TOKENS = IMPLEMENTER_MAX_TOKENS
+RESULTS = Path("probe_replanner_results.jsonl")
+TRUNCATED = "TRUNCATED"
 GATE_BUILD = 6  # of 12: build arm D
 GATE_STOP = 3  # below this of 12: do not build arm D
 RULE = "=" * 78
@@ -263,44 +288,139 @@ def show(triggers: list[Trigger], description: str, full: bool) -> None:
             print(message[message.index("<previous_plan>"):])
 
 
-def run(triggers: list[Trigger], description: str, client, log: EventLog, samples: int) -> int:
-    results: list[tuple[Trigger, int, Plan, Grade]] = []
+# -- the results file --------------------------------------------------------
+
+
+def prompt_sha(user: str) -> str:
+    """Identifies the exact question a row answered: system prompt plus message."""
+    return hashlib.sha256(f"{REPLAN_SYSTEM_PROMPT}\x00{user}".encode()).hexdigest()
+
+
+def load_results(path: Path) -> dict[tuple[str, int], dict[str, Any]]:
+    """Finished samples keyed by (run_id, sample). A torn last line is ignored.
+
+    A crash can only interrupt the append itself, and then only the final line,
+    so that one line is dropped (its sample is re-asked) rather than refusing
+    to resume over it.
+    """
+    if not path.exists():
+        return {}
+    done: dict[tuple[str, int], dict[str, Any]] = {}
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            if number == len(lines):
+                continue
+            raise SystemExit(f"{path}:{number} is not JSON; fix or remove that line")
+        done[(row["run_id"], row["sample"])] = row
+    return done
+
+
+def append_result(path: Path, row: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def check_prompts(done: dict[tuple[str, int], dict[str, Any]], shas: dict[str, str], path: Path) -> None:
+    """Refuse to mix answers to two different prompts under one gate."""
+    stale = sorted({run_id for (run_id, _), row in done.items()
+                    if run_id in shas and row["prompt_sha"] != shas[run_id]})
+    if stale:
+        raise SystemExit(f"{path} holds samples asked a different prompt for {', '.join(stale)}; "
+                         "use a fresh --results file")
+
+
+# -- one sample --------------------------------------------------------------
+
+
+def ask(trigger: Trigger, sample: int, user: str, client, log: EventLog) -> dict[str, Any]:
+    """One re-plan call, as a results row. Truncation is a row, not an exception."""
+    log.append(attempt=trigger.at_attempt, agent="probe", event="replan_probe_started",
+               payload={"run_id": trigger.run_id, "trigger": trigger.kind, "sample": sample})
+    log.append(attempt=trigger.at_attempt, agent="replanner", event="llm_request",
+               payload={"system_chars": len(REPLAN_SYSTEM_PROMPT), "user_chars": len(user)})
+    row: dict[str, Any] = {
+        "run_id": trigger.run_id, "sample": sample, "trigger": trigger.kind,
+        "at_attempt": trigger.at_attempt, "attempts_left": trigger.attempts_left,
+        "max_tokens": MAX_TOKENS, "thinking_level": THINKING_LEVEL, "prompt_sha": prompt_sha(user),
+    }
+    try:
+        result = client.complete_structured(system=REPLAN_SYSTEM_PROMPT, user=user, schema=Plan,
+                                            max_tokens=MAX_TOKENS, thinking_level=THINKING_LEVEL)
+    except LLMTruncatedError as error:
+        call = error.call_payload or {}
+        log.append(attempt=trigger.at_attempt, agent="replanner", event="llm_response", payload=call)
+        log.append(attempt=trigger.at_attempt, agent="probe", event="replan_probe_truncated",
+                   payload={"detail": str(error)})
+        return {**row, **call, "label": TRUNCATED, "prescribes_slice": None,
+                "names_mechanism": None, "plan": None, "detail": str(error)}
+
+    log.append(attempt=trigger.at_attempt, agent="replanner", event="llm_response",
+               payload=result.log_payload())
+    plan, verdict = result.value, grade(result.value)
+    log.append(attempt=trigger.at_attempt, agent="replanner", event="agent_produced",
+               payload={"plan": plan, "grade": verdict.label})
+    return {**row, **result.log_payload(), "label": verdict.label,
+            "prescribes_slice": verdict.prescribes_slice, "names_mechanism": verdict.names_mechanism,
+            "plan": plan.model_dump(mode="json")}
+
+
+def run(triggers: list[Trigger], description: str, client, log: EventLog, samples: int,
+        results_path: Path = RESULTS) -> int:
+    users = {trigger.run_id: message_for(trigger, description) for trigger in triggers}
+    done = load_results(results_path)
+    check_prompts(done, {run_id: prompt_sha(user) for run_id, user in users.items()}, results_path)
 
     for trigger in triggers:
-        user = message_for(trigger, description)
         for sample in range(1, samples + 1):
-            log.append(attempt=trigger.at_attempt, agent="probe", event="replan_probe_started",
-                       payload={"run_id": trigger.run_id, "trigger": trigger.kind, "sample": sample})
-            log.append(attempt=trigger.at_attempt, agent="replanner", event="llm_request",
-                       payload={"system_chars": len(REPLAN_SYSTEM_PROMPT), "user_chars": len(user)})
-            result = client.complete_structured(system=REPLAN_SYSTEM_PROMPT, user=user, schema=Plan,
-                                                max_tokens=MAX_TOKENS, thinking_level=THINKING_LEVEL)
-            log.append(attempt=trigger.at_attempt, agent="replanner", event="llm_response",
-                       payload=result.log_payload())
-            plan, verdict = result.value, grade(result.value)
-            log.append(attempt=trigger.at_attempt, agent="replanner", event="agent_produced",
-                       payload={"plan": plan, "grade": verdict.label})
-            results.append((trigger, sample, plan, verdict))
-            print(f"  {trigger.run_id[-6:]} sample {sample}: {verdict.label}")
+            if (trigger.run_id, sample) in done:
+                print(f"  {trigger.run_id[-6:]} sample {sample}: "
+                      f"{done[(trigger.run_id, sample)]['label']} (already in {results_path})")
+                continue
+            row = ask(trigger, sample, users[trigger.run_id], client, log)
+            append_result(results_path, row)
+            done[(trigger.run_id, sample)] = row
+            print(f"  {trigger.run_id[-6:]} sample {sample}: {row['label']}")
+
+    summarize([done[(t.run_id, s)] for t in triggers for s in range(1, samples + 1)],
+              planned=len(triggers) * samples)
+    print(f"Results: {results_path}. Log: {log.path}")
+    return 0
+
+
+def summarize(rows: list[dict[str, Any]], planned: int) -> None:
+    def flag(value: bool | None) -> str:
+        return "-" if value is None else ("yes" if value else "no")
 
     print(f"\n{RULE}\nRESULTS\n{RULE}")
     header = f"{'run':<8} {'trigger':<16} {'left':<5} {'sample':<7} {'slice':<6} {'mechanism':<10} grade"
     print(header)
     print("-" * len(header))
-    for trigger, sample, _, verdict in results:
-        print(f"{trigger.run_id[-6:]:<8} {trigger.kind:<16} {trigger.attempts_left:<5} {sample:<7} "
-              f"{'yes' if verdict.prescribes_slice else 'no':<6} "
-              f"{'yes' if verdict.names_mechanism else 'no':<10} {verdict.label}")
+    for row in rows:
+        print(f"{row['run_id'][-6:]:<8} {row['trigger']:<16} {row['attempts_left']:<5} "
+              f"{row['sample']:<7} {flag(row['prescribes_slice']):<6} "
+              f"{flag(row['names_mechanism']):<10} {row['label']}")
 
     print(f"\n{RULE}\nPLANS, VERBATIM\n{RULE}")
-    for trigger, sample, plan, verdict in results:
-        print(f"\n{trigger.run_id[-6:]} sample {sample} [{verdict.label}]")
-        print(indent(render_plan(plan), "  "))
+    for row in rows:
+        print(f"\n{row['run_id'][-6:]} sample {row['sample']} [{row['label']}]")
+        if row["plan"] is None:
+            print(f"  no plan: {row.get('detail', 'truncated')} (usage: {row.get('usage')})")
+        else:
+            print(indent(render_plan(Plan.model_validate(row["plan"])), "  "))
 
-    passes = sum(verdict.label == "PASS" for *_, verdict in results)
-    print(f"\n{passes}/{len(results)} PASS by heuristic -> {gate(passes, len(results))}")
-    print(f"Overrule by hand where the verbatim plans disagree with the flags. Log: {log.path}")
-    return 0
+    counts = {label: sum(row["label"] == label for row in rows)
+              for label in ("PASS", "MIXED", "FAIL", TRUNCATED)}
+    print(f"\n{RULE}\nSUMMARY\n{RULE}")
+    print("  ".join(f"{label} {count}" for label, count in counts.items()) + f"  (of {planned})")
+    print(f"TRUNCATED counts as not PASS: the gate is {counts['PASS']} PASS over all "
+          f"{planned} planned samples, truncated ones included.")
+    print(f"Gate: {counts['PASS']}/{planned} PASS by heuristic -> {gate(counts['PASS'], planned)}")
+    print("Overrule by hand where the verbatim plans disagree with the flags.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -309,13 +429,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--full", action="store_true", help="with --dry-run, print whole user messages")
     parser.add_argument("--samples", type=int, default=SAMPLES)
     parser.add_argument("--min-call-interval", type=float, default=MIN_CALL_INTERVAL)
+    parser.add_argument("--results", type=Path, default=RESULTS,
+                        help="finished samples; a rerun skips those already here")
     args = parser.parse_args(argv)
 
     triggers = load_triggers()
     description = DEFAULT_DESCRIPTION  # what the driver handed every run
     if args.dry_run:
         show(triggers, description, args.full)
-        print(f"\n{len(triggers) * args.samples} call(s) would be made.")
+        done = load_results(args.results)
+        todo = sum((t.run_id, s) not in done for t in triggers for s in range(1, args.samples + 1))
+        print(f"\n{todo} call(s) would be made ({len(triggers) * args.samples - todo} already in "
+              f"{args.results}); max_tokens {MAX_TOKENS}, thinking {THINKING_LEVEL}.")
         return 0
 
     from llm_openrouter import OpenRouterClient
@@ -323,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
     log = EventLog(f"probe_replanner_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
     try:
         client = PacedClient(OpenRouterClient(), Pacer(args.min_call_interval))
-        return run(triggers, description, client, log, args.samples)
+        return run(triggers, description, client, log, args.samples, args.results)
     except LLMError as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 2

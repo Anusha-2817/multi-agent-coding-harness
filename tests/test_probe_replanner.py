@@ -5,9 +5,14 @@ No call is made and no bench file is read; events are built here.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+import probe_replanner
 from harness.agents.planner import SYSTEM_PROMPT
+from harness.events import EventLog
+from harness.llm import LLMResult, LLMTransportError, LLMTruncatedError
 from harness.state import Plan
 from probe_replanner import (
     REPLAN_SYSTEM_PROMPT,
@@ -173,3 +178,120 @@ class TestGrade:
 ])
 def test_gate_on_twelve(passes, expected):
     assert gate(passes, 12) == expected
+
+
+# -- the run: truncation, the results file, resume ---------------------------
+
+GOOD = plan_with("Double every brace in tok_text for FSTRING_MIDDLE tokens.")
+FAIL_PLAN = plan_with("Set tok_text = line[scol:ecol] for FSTRING_MIDDLE.")
+USAGE = {"input_tokens": 5000, "output_tokens": 900, "cache_read_input_tokens": 0, "thinking_tokens": 0}
+
+
+class FakeClient:
+    """Answers from a script: a Plan, or an exception to raise. Records every call."""
+
+    def __init__(self, *script):
+        self.script, self.calls = list(script), []
+
+    def complete_structured(self, **kwargs):
+        self.calls.append(kwargs)
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return LLMResult(value=item, model="m", stop_reason="STOP", parse_attempts=1, usage=USAGE)
+
+
+def truncated():
+    error = LLMTruncatedError("ran out of budget", stage="response", raw_text="")
+    error.call_payload = {"model": "m", "stop_reason": "MAX_TOKENS", "parse_attempts": 1,
+                          "usage": {**USAGE, "output_tokens": 24000}}
+    return error
+
+
+@pytest.fixture
+def setup(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tokenize_rt.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(probe_replanner, "TASK_DIR", repo)
+    triggers = [replay_trigger(name, run(attempt_tested(1, FAIL_A), attempt_tested(2, FAIL_A)))
+                for name in ("run_a", "run_b")]
+    log = EventLog("probe_test", log_dir=tmp_path / "logs")
+    return triggers, log, tmp_path / "results.jsonl"
+
+
+def rows(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+class TestRun:
+    def test_the_budget_is_the_implementers_and_thinking_is_the_planners(self, setup):
+        triggers, log, results = setup
+        client = FakeClient(GOOD)
+
+        probe_replanner.run(triggers[:1], "d", client, log, 1, results)
+
+        assert client.calls[0]["max_tokens"] == 24000
+        assert client.calls[0]["thinking_level"] == "LOW"
+        assert rows(results)[0]["max_tokens"] == 24000
+
+    def test_a_truncated_sample_is_recorded_and_the_probe_continues(self, setup, capsys):
+        triggers, log, results = setup
+        client = FakeClient(GOOD, truncated(), GOOD, FAIL_PLAN)
+
+        assert probe_replanner.run(triggers, "d", client, log, 2, results) == 0
+
+        labels = [row["label"] for row in rows(results)]
+        assert labels == ["PASS", "TRUNCATED", "PASS", "FAIL"]
+        cut = rows(results)[1]
+        assert cut["plan"] is None and cut["stop_reason"] == "MAX_TOKENS"
+        assert cut["usage"]["output_tokens"] == 24000
+        out = capsys.readouterr().out
+        assert "PASS 2  MIXED 0  FAIL 1  TRUNCATED 1  (of 4)" in out
+        assert "TRUNCATED counts as not PASS" in out
+
+    def test_each_sample_is_written_before_the_next_call(self, setup):
+        triggers, log, results = setup
+        transport = LLMTransportError("503", status_code=503, retryable=True)
+        client = FakeClient(GOOD, transport)
+
+        with pytest.raises(LLMTransportError):
+            probe_replanner.run(triggers, "d", client, log, 2, results)
+
+        assert [(row["run_id"], row["sample"], row["label"]) for row in rows(results)] == [
+            ("run_a", 1, "PASS")]
+
+    def test_a_rerun_skips_finished_samples_truncated_ones_included(self, setup):
+        triggers, log, results = setup
+        probe_replanner.run(triggers[:1], "d", FakeClient(GOOD, truncated()), log, 2, results)
+
+        client = FakeClient(FAIL_PLAN, GOOD)
+        probe_replanner.run(triggers, "d", client, log, 2, results)
+
+        assert len(client.calls) == 2  # only run_b's two samples
+        assert [row["run_id"] for row in rows(results)] == ["run_a", "run_a", "run_b", "run_b"]
+
+    def test_rows_asked_a_different_prompt_are_refused(self, setup):
+        triggers, log, results = setup
+        probe_replanner.run(triggers[:1], "first description", FakeClient(GOOD), log, 1, results)
+
+        with pytest.raises(SystemExit, match="different prompt"):
+            probe_replanner.run(triggers[:1], "second description", FakeClient(GOOD), log, 2, results)
+
+    def test_a_torn_last_line_is_reasked(self, setup):
+        triggers, log, results = setup
+        probe_replanner.run(triggers[:1], "d", FakeClient(GOOD), log, 1, results)
+        with results.open("a", encoding="utf-8") as handle:
+            handle.write('{"run_id": "run_a", "sam')
+
+        client = FakeClient(GOOD)
+        probe_replanner.run(triggers[:1], "d", client, log, 2, results)
+
+        assert len(client.calls) == 1
+
+    def test_a_torn_line_in_the_middle_refuses(self, setup):
+        _, _, results = setup
+        results.write_text('{"broken\n{"run_id": "r", "sample": 1}\n', encoding="utf-8")
+
+        with pytest.raises(SystemExit, match=":1 is not JSON"):
+            probe_replanner.load_results(results)
