@@ -427,8 +427,9 @@ tokenize-rt was run 3 times per arm, and 0 of the 9 runs solved it. Its row show
 
 ### Table 2 — diff edits
 
-`--edit-format diff` (search/replace blocks), 4 tasks, repeat 0, same model. Model calls per
-run.
+`--edit-format diff` (search/replace blocks), repeat 0, same model. Model calls per run. Every
+number in this table is a diff-mode run; the full-file numbers for the same tasks are in Table 1.
+mccabe and addict were run in arm C only; "—" means not run in diff mode.
 
 | Task | A | B | C |
 |---|---|---|---|
@@ -436,6 +437,8 @@ run.
 | cfgv | ✅ 1 | ✅ 2 | ✅ 3 |
 | shortuuid | ✅ 1 | ✅ 2 | ✅ 3 |
 | tokenize-rt | ❌ 5 | ❌ 3 | ❌ 8 |
+| mccabe | — not run in diff mode | — not run in diff mode | ✅ 3 |
+| addict | — not run in diff mode | — not run in diff mode | ✅ 3 |
 
 ### Table 3 — total output tokens per run, full → diff
 
