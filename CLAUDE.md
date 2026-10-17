@@ -26,7 +26,7 @@ These are documented-only. Do NOT build them, do NOT scaffold them, do NOT add "
 - Concurrency, parallelism, async
 - LangGraph / LangChain / CrewAI / any agent framework
 - A second task mode (feature implementation)
-- Routing rejections back to the Planner (v2 — v1 detects and escalates only). **Lifted for benchmark arm D only, on 2026-10-17, by the user's explicit decision**: one re-plan per run, behind a `replanner` argument that is `None` for every other arm and for `cli.py`. A, B, C and the shipped CLI still never replan. D is **designed, not built**: only its Stage 0 probe (`probe_replanner.py`) exists, and D is built only after the user reports that probe passed. See "Arm D: one re-plan".
+- Routing rejections back to the Planner (v2 — v1 detects and escalates only). **Lifted for benchmark arm D only, on 2026-10-17, by the user's explicit decision**: one re-plan per run, behind a `replanner` argument that is `None` for every other arm and for `cli.py`. A, B, C and the shipped CLI still never replan. D was **designed, probe-gated, and not built**: its Stage 0 probe failed its gate (0/12 PASS, 2026-10-17), so no code was written under this lift, and A, B, C and `cli.py` are exactly as before. See "Arm D: one re-plan — not pursued".
 - Git worktrees
 - TaskState snapshotting
 
@@ -504,7 +504,7 @@ Because every attempt starts from an identical baseline, two identical diffs are
 
 Comparison is literal byte equality. No whitespace normalization, no fuzzy matching. If the loop is genuinely stuck, the text will be identical; anything looser risks halting a run that was actually making progress.
 
-v1 diagnoses this. It does not act on it by replanning. (Arm D, if built, is the one exception: its first livelock triggers a re-plan instead of a halt, and a second one halts as here. See "Arm D: one re-plan".)
+v1 diagnoses this. It does not act on it by replanning. (Arm D would have been the one exception, re-planning on its first livelock. It was probe-gated and not built. See "Arm D: one re-plan — not pursued".)
 
 ---
 
@@ -1004,7 +1004,7 @@ v1 never replans. A rejection routes back to the Implementer, which re-reads the
 
 The claim: because the prompt's correspondence check says "the plan describes a mechanism, not merely an outcome", the Reviewer approves a faithful implementation of a wrong plan and would reject a correct fix that departs from it. When the plan's mechanism is one the Tester has already refuted, the Reviewer therefore holds the run on the refuted path rather than off it — and by invariant 2 it never sees the refutation. In arm C the plan is binding by design, and a wrong plan is unrecoverable unless something upstream of the Reviewer changes it.
 
-Evidence for it, all from tokenize-rt `cb7836b` on Gemini 3.8 (see "Arm D: one re-plan"): in the four C runs the Reviewer approved every plan-faithful `line[scol:ecol]` diff it saw (eleven approvals) with reasons of the form "directly implements step N", while the Tester showed the same failing assertion each time; its five rejections were all for stray hunks, never for the mechanism.
+Evidence for it, all from tokenize-rt `cb7836b` on Gemini 3.8 (see "Arm D: one re-plan — not pursued"): in the four C runs the Reviewer approved every plan-faithful `line[scol:ecol]` diff it saw (eleven approvals) with reasons of the form "directly implements step N", while the Tester showed the same failing assertion each time; its five rejections were all for stray hunks, never for the mechanism.
 
 What it does **not** yet show, and why it stays a hypothesis: no run ever offered the Reviewer a correct *off-plan* fix, so the "would reject a correct fix" half is inferred from the prompt, not observed. One task, one model. To test it cheaply: a `probe_reviewer.py`-style pair — the refuted plan with the upstream brace-doubling diff — expecting a rejection if H1 holds. Do not change the Reviewer prompt on the strength of H1 alone.
 
@@ -1130,7 +1130,7 @@ Three arms, run against the same targets, so each comparison varies one thing.
 | A | `baseline.py`: one agent, no Planner, no Reviewer, auto-approve, no livelock check, no scope rules | built and tested with stubs; never run live |
 | B | `harness_arms.py --arm B`: the harness without the Reviewer (a pass-through that approves without a model call): Planner, Implementer and Tester, with C's loop, livelock check, scope rules and attempt cap | built and tested with stubs; never run live |
 | C | `harness_arms.py --arm C`: the full harness: Planner, Implementer, Reviewer, Tester | built and tested with stubs; never run live |
-| D | C plus one re-plan per run (diff mode) | **designed, not built.** Stage 0 probe built; D waits on the user's report that it passed. See "Arm D: one re-plan" |
+| D | C plus one re-plan per run (diff mode) | **designed, probe-gated, gate failed, not built.** Stage 0 scored 0/12 PASS against a threshold of 6. See "Arm D: one re-plan — not pursued" |
 
 **Held identical across all three:** the model (`llm.DEFAULT_MODEL`), the Implementer's `MAX_TOKENS` and thinking level, `MAX_ATTEMPTS`, the real Tester, a baseline reset at the top of every attempt, `.git` exclusion, the `approve` seam (auto-approved in all three), and the edit format (`--edit-format`, one per driver session and per results file; see "Diff-mode edits").
 
@@ -1157,9 +1157,41 @@ python-slugify has no task: its recent fixes have 39–58k-character repos and f
 
 ---
 
-## Arm D: one re-plan
+## Arm D: one re-plan — not pursued
 
-**Status (2026-10-17): designed and approved with notes; only Stage 0 is built.** The fence on replanning is lifted for this arm alone (see "Hard scope fence"). Nothing in `harness/` has changed for it. Do **not** build D — no `replanner` argument, no `CONTRACTS` row, no `TaskState` field, no arm in `harness_arms.py` or `driver.py` — until the user reports that the Stage 0 probe passed.
+**Status (2026-10-17): designed, probe-gated, gate failed, not built.** The Stage 0 probe scored **0 of 12 PASS** against a build threshold of 6 (details under "Stage 0 result" below). Nothing in `harness/` was ever changed for D: there is no `replanner` argument, no `CONTRACTS` row, no `TaskState` field, and no arm D in `harness_arms.py` or `driver.py`. The design below is kept as a record of what was decided and why it stopped. It is **not a backlog item**. Reopening it needs new evidence, such as a different model or a different task where a plan is refuted, not a rerun of this probe.
+
+### Stage 0 result
+
+Run by the user on 2026-10-17, 12 samples, results in `probe_replanner_results.jsonl`.
+
+| Grade | Count | What it means |
+| --- | --- | --- |
+| PASS | 0 | names brace doubling or an `ecol` adjustment, and drops the slice |
+| MIXED | 2 | names a mechanism but still prescribes the slice (both 545a2e) |
+| FAIL | 6 | no new mechanism |
+| TRUNCATED | 4 | hit the 24,000-token budget with no plan (2e564e ×2, d4d575 ×2) |
+
+Gate: 0/12 against a build threshold of ≥ 6 and a stop threshold of < 3. **The heuristic grader and the user's own reading of the plans agree that the result is far below the gate.** The user's reading:
+- **At most 1 of 12 is plausibly correct:** d73bc3 sample 1, which merges adjacent single-brace `FSTRING_MIDDLE` tokens. That is unverified, and it is not the upstream mechanism.
+- **2 plans edit the test file.**
+- **1 plan is a no-op.**
+- **4 truncated.**
+
+Even if the plausible one counted, 1/12 is below the stop line.
+
+What it cost and what it shows:
+- **Cost:** about $0.61 for the 12 samples at the sourced 3.8 prices (36.1k uncached input, 26.4k cached input, 154.6k output tokens). The crashed first attempt is extra.
+- **Output is the cost driver.** It ran from 369 to 23,986 tokens per sample. On OpenRouter thinking is folded into output (`thinking_tokens` is always 0), so long outputs are mostly thinking.
+- **The truncations are themselves evidence.** A third of samples spent the whole 24k budget without settling on a plan.
+
+What this says, within its limits:
+- **The binding constraint looks like model knowledge, not loop structure.** Shown that its mechanism was tried and the failure did not move, Gemini 3.8 Flash did not get to the fact that `ecol` is counted on unescaped text, and some samples reached for the test file instead.
+- **Limits:** one task, one model, one prompt.
+- **What it does not test:** whether re-planning helps on other kinds of refuted plans. Nothing here measured that, and it should not be cited as showing re-planning is useless in general.
+- **H1** (the Reviewer enforces the plan's mechanism) is unaffected and still untested.
+
+The "never replans" wording in `loop.py`, `planner.py`, the Reviewer prompt notes and "Stub agents" is **still accurate** and was deliberately left alone. Since D was not built, the "Docs to change when D is built" list below never applied.
 
 ### Why: the diagnosis, from logs only
 
@@ -1172,7 +1204,7 @@ All eight tokenize-rt `cb7836b` B and C runs on Gemini 3.8 (`eval_38.jsonl` repe
 
 Classification: not (a) wrong target and not (b) right plan, wrong fix — a third case, **right target, refuted mechanism in the plan**. That supports a re-plan. Its limits: one task (it is C's only failure on 3.8), one model, and the only new fact a re-plan adds is "the mechanism was tried and the failure did not move". Whether Flash gets from there to the `ecol` coordinate fact is exactly what Stage 0 measures.
 
-### The design (to build only after Stage 0 passes)
+### The design (not pursued: Stage 0 failed; kept for the record)
 
 - **Trigger:** the first of (i) livelock, or (ii) a tested failure whose `failed_tests` and `traceback` are byte-identical to the previous *tested* failure. No re-plan if no diff has been tested yet, or if `attempt_count == MAX_ATTEMPTS`; the run then halts exactly as C. Replayed on the four C runs: 2e564e stall at a3 (2 attempts left), 545a2e stall at a4 (1), d4d575 livelock at a4 (1), d73bc3 stall at a2 (3).
 - **Cap:** one re-plan per run. A second trigger halts with today's status and reason.
@@ -1184,17 +1216,17 @@ Classification: not (a) wrong target and not (b) right plan, wrong fix — a thi
 - **Docs to change when D is built:** the order-of-operations diagram, the ownership and contracts tables, "The control loop", "Livelock detection", `loop.py`'s and `planner.py`'s "never replans" docstrings (still true of the code today, so left alone for now), and "Stub agents" (`StubPlanner`'s one-entry script remains the no-replan assertion for A, B, C).
 - **Stub tests:** `replanner=None` leaves the suite unchanged; livelock → re-plan → success; stall triggers; a second livelock halts with one re-planner call; a trigger at attempt 5 halts with `replan_skipped`; evidence cleared after re-plan; a post-re-plan diff equal to an earlier one livelocks; a livelock after a rejection still hands over the last *tested* failure; the contract row binds; the Reviewer sees the new plan; scorer and driver fields.
 
-### The gate, about $3 budgeted
+### The gate, about $3 budgeted (Stage 0 failed; Stages 1 and 2 were never run)
 
 Prices: `prices.json` now carries a sourced 3.8 thinking price ($3.75/Mtok, the endpoints listing's `internal_reasoning` field, equal to the output price), so 3.8 runs with thinking tokens get a cost. Rows already in `eval_38*.jsonl` were scored before that and still read `cost_usd: null`. Estimates: one C diff tokenize-rt run ≈ $0.04; one re-plan call ≈ $0.01–0.02.
 
-1. **Stage 0 — `probe_replanner.py`, 12 calls, ≈ $0.2. Built; to be run by the user.** The re-planner prompt is fed the four C runs' recorded evidence at their replayed trigger points, 3 samples each, via OpenRouter, paced. Each new plan is flagged by a heuristic (still prescribes the `[scol:ecol]` slice? names brace doubling or an `ecol` adjustment?) and printed verbatim for a human to overrule. **≥ 6/12 PASS → build D; < 3/12 → do not build D** (the gap is model knowledge, not loop structure); in between, read the plans. Offline checks: all eight recorded plans grade FAIL; `--dry-run` replays the four triggers above and makes no call.
+1. **Stage 0 — `probe_replanner.py`, 12 calls, estimated ≈ $0.2, actual ≈ $0.61. Run; gate failed at 0/12 (see "Stage 0 result").** The re-planner prompt is fed the four C runs' recorded evidence at their replayed trigger points, 3 samples each, via OpenRouter, paced. Each new plan is flagged by a heuristic (still prescribes the `[scol:ecol]` slice? names brace doubling or an `ecol` adjustment?) and printed verbatim for a human to overrule. **≥ 6/12 PASS → build D; < 3/12 → do not build D** (the gap is model knowledge, not loop structure); in between, read the plans. Offline checks: all eight recorded plans grade FAIL; `--dry-run` replays the four triggers above and makes no call.
    - **First live attempt (log `logs/probe_replanner_20261016T202837Z.jsonl`) crashed on sample 3 with `LLMTruncatedError`** at the Planner's 16,000-token budget. Samples 1–2 both graded FAIL, with 3,110 and 4,181 output tokens and `thinking_tokens: 0` — so on OpenRouter, thinking appears to be counted inside output. They predate the results file and are not counted toward the gate.
    - **Fix:** the budget is now the Implementer's 24,000, with thinking left at the Planner's `LOW`. A sample that still truncates is recorded as **TRUNCATED** and the probe moves on.
    - **How TRUNCATED counts:** it is not a PASS, and the gate's denominator stays the planned 12. In arm D a truncated re-plan would be a crashed run, not a recovery.
    - **Results file:** each finished sample is appended to `probe_replanner_results.jsonl` as it completes, and a rerun skips samples already there, TRUNCATED included. Delete a line to re-ask that sample. Rows carry a prompt hash, and a rerun refuses to mix rows that were asked different prompts.
-2. **Stage 1 — D diff ×10 on tokenize-rt, plus C diff ×3 more** for a firmer baseline (C is 0/4 now). ≈ $0.6–1.0. Honest statistics: 3/10 vs 0/7 is p ≈ 0.18 (one-sided Fisher), 5/10 vs 0/7 is p ≈ 0.04. A signal-finding gate, not proof.
-3. **Stage 2 — required. D diff ×1 on each of the other five eval tasks** (humps, addict, shortuuid, cfgv, mccabe), plus C diff ×1 on addict and mccabe, which have no diff-mode C row yet. ≈ $0.3. Passes if D resolves every task C resolves in the paired cells, and every `replan_triggered` on them is read and explained. A task C resolves and D does not is a regression, and D is not adopted until it is understood.
+2. **Stage 1 (not run) — D diff ×10 on tokenize-rt, plus C diff ×3 more** for a firmer baseline (C is 0/4 now). ≈ $0.6–1.0. Honest statistics: 3/10 vs 0/7 is p ≈ 0.18 (one-sided Fisher), 5/10 vs 0/7 is p ≈ 0.04. A signal-finding gate, not proof.
+3. **Stage 2 (not run; it would have been required) — D diff ×1 on each of the other five eval tasks** (humps, addict, shortuuid, cfgv, mccabe), plus C diff ×1 on addict and mccabe, which have no diff-mode C row yet. ≈ $0.3. Passes if D resolves every task C resolves in the paired cells, and every `replan_triggered` on them is read and explained. A task C resolves and D does not is a regression, and D is not adopted until it is understood.
 
 **Not verifiable offline:** whether Flash writes a correct new plan; whether 1–3 remaining attempts suffice after it; whether the re-plan prompt over-corrects (edits tests — the scope check guards that — or abandons a right plan on another task, which is what Stage 2 is for).
 
@@ -1312,7 +1344,7 @@ tests/              tests for the harness itself — zero API calls, no API key
 cli.py
 probe_reviewer.py   instrument, not a component. Nine real calls; outside tests/ on purpose
 probe_implementer.py instrument. One real call (the plan is cached from a transcript)
-probe_replanner.py  arm D Stage 0: re-plan on recorded tokenize-rt evidence. 12 real calls (OpenRouter)
+probe_replanner.py  arm D Stage 0: re-plan on recorded tokenize-rt evidence. 12 real calls (OpenRouter). Run once: 0/12, gate failed
 probe_plan.json     fixture 3's plan, fetched by probe_reviewer --fetch-plan. One call
 probe_plan_fixture_1.json  fixture 1's plan, lifted from a saved run. No call spent
 baseline.py         benchmark arm A: one agent, no Planner, no Reviewer. Outside cli.py on purpose
@@ -1341,7 +1373,7 @@ README.md
 
 Update this section at the end of every session. It is the first thing to read next session.
 
-**2026-10-17 — arm D, Stage 0 only.** The tokenize-rt diagnosis is in "Arm D: one re-plan", and H1 is recorded under "The Reviewer" as an unproven hypothesis. The replan fence is lifted for arm D only. Built: `probe_replanner.py` and `tests/test_probe_replanner.py`. `prices.json` now has the sourced 3.8 thinking price, and `test_scorer.py` was updated to match. No live call was made and nothing was committed. **Next:** the user runs `python probe_replanner.py` (12 calls, `OPENROUTER_API_KEY`) and reports. Arm D is not built until they say the probe passed.
+**2026-10-17 — arm D, Stage 0 only.** The tokenize-rt diagnosis is in "Arm D: one re-plan — not pursued", and H1 is recorded under "The Reviewer" as an unproven hypothesis. The replan fence was lifted for arm D only. Built: `probe_replanner.py` and `tests/test_probe_replanner.py`. `prices.json` now has the sourced 3.8 thinking price, and `test_scorer.py` was updated to match. No live call was made and nothing was committed. **Then (same day): the probe ran and failed its gate**: PASS 0, MIXED 2, FAIL 6, TRUNCATED 4 of 12. The heuristic and the user's reading of the plans agree it is far below the threshold of 6. **Arm D is not built and not pursued.** Only docs changed after that, and the "never replans" wording was left alone because it is still accurate. See "Arm D: one re-plan — not pursued".
 
 **Phase:** 6 — **in progress. 6.0.5, 6.1, 6.2, 6.3, 6.4 and 6.5 are done: the CLI takes any repo, 6.2's python-slugify run went green end to end after producing four findings and one crash, 6.3 fixed the one finding that stopped a run, 6.4 confirmed that fix against a real `.git` object store, and 6.5 fixed F4 so a failing attempt on a colour-forcing repo can retry instead of escalating.** `cli.py` now takes any repo on disk and finds the failure itself. Phase 5 is complete as recorded below.
 **The governing rule is now live, not hypothetical:** 6.2 has said what broke, so 6.3 may finally build — but only the one thing 6.2 evidenced. See "The next two steps" below, which are fixed and should not be re-chosen from 6.3's table.
@@ -2299,7 +2331,7 @@ The benchmark task set avoids every subtest-dependent candidate, so it does not 
 - **Why the Planner chose the test file.** The failure output shows a mismatch between expected and actual tokens. Reading the expected list as the stale side is one possible cause; nothing in the log says which reading it took, or why.
 - **Whether a re-plan would have helped.** v1 never replans, so every retry re-read the same test-only plan. Under "Fixture design: the recoverability constraint", a wrong plan is unrecoverable by construction, which matches what happened, but no run has tested a second plan.
 
-**Status: recorded, nothing built.** This is the **first candidate for the parked re-plan gate** (routing back to the Planner, behind the scope fence as a v2 item). It is not yet a reason to build it: one run, one task, one model. It is also the **first observed instance** of "A known hole: a plan that targets a test file", whose named fix is a `Plan` validator rejecting test paths in `target_files`. That trigger has now fired once; the decision is still open.
+**Status: recorded, nothing built.** This is the **first candidate for the parked re-plan gate** (routing back to the Planner, behind the scope fence as a v2 item). It is not yet a reason to build it: one run, one task, one model. (Revisited on 3.8 on 2026-10-17. There the plans targeted the right file, but with a refuted mechanism. A re-plan probe scored 0/12 and arm D was not built. See "Arm D: one re-plan — not pursued".) It is also the **first observed instance** of "A known hole: a plan that targets a test file", whose named fix is a `Plan` validator rejecting test paths in `target_files`. That trigger has now fired once; the decision is still open.
 
 ### F11 — Diff-based edits: provisional gate passed
 

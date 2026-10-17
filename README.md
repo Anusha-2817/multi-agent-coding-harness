@@ -472,6 +472,33 @@ calls: 0.
 - The earlier `gemini-3.6-flash` results live in separate files and are not comparable.
 - Cost (`cost_usd`) is not reported yet.
 
+### Arm D (one re-plan): designed, probe-gated, gate failed, not built
+
+**Diagnosis, from the logs alone.** All 8 tokenize-rt B and C runs failed for the same reason:
+- The Planner picked the right file, `tokenize_rt.py`, every time.
+- Every plan prescribed `tok_text = line[scol:ecol]` for f-string middles. Under Python 3.12+ tokenize, `ecol` is counted on the *unescaped* text, so that slice equals `tok_text` and the fix changes nothing.
+- The Implementer followed the plan, the Tester showed the same failing assertion every attempt, and in arm C the Reviewer approved the plan-faithful diffs.
+
+The fault was in the plan, not in the implementation.
+
+**The idea.** Arm D = arm C plus at most one re-plan, triggered by a livelock or by two identical test failures. The re-planner is shown the refuted plan, the diff that implemented it, and the failure it produced.
+
+**The cheap gate first.** Before building anything, `probe_replanner.py` asked the re-plan prompt 12 times (4 recorded C runs × 3 samples), at their replayed trigger points.
+
+| PASS | MIXED | FAIL | TRUNCATED | Gate to build |
+|---|---|---|---|---|
+| 0 | 2 | 6 | 4 | ≥ 6 of 12 |
+
+**The heuristic grader and a hand read agree that this is far below the gate.** In the hand read:
+- At most 1 of 12 plans is plausibly correct, and it is unverified.
+- 2 plans would edit the test file.
+- 1 is a no-op.
+- 4 used the whole 24,000-token budget without producing a plan.
+
+The probe cost about $0.61. **Arm D was not built.** On this task and model, the missing piece looks like model knowledge, not loop structure.
+
+This is one task, one model and one prompt. It does not show that re-planning is useless in general. The design and the full numbers are in `CLAUDE.md`, under "Arm D: one re-plan — not pursued".
+
 ### How it is run
 
 Four scripts at the repo root, none of them part of the shipped CLI:
@@ -531,7 +558,7 @@ unfinished work.
 - [x] A fail-then-recover run against a real model (schema, recorded as F8 in `CLAUDE.md`; arm C on humps in the benchmark)
 - [x] Three-arm benchmark on six real upstream bugs (tag `v0.1.0`)
 - [x] Diff-based edits behind `--edit-format` (branch `diff-edits`). The provisional gate passed; the full-split gate has not been run, so the default stays `full`
-- [ ] (v2) Route a livelock back to the Planner rather than halting
+- [ ] (v2) Route a livelock back to the Planner rather than halting. Probed as arm D on tokenize-rt: the gate failed at 0/12 and it was not built (see "Arm D" under Benchmark results)
 - [ ] (v2) Second task mode: feature implementation from a structured requirement
 - [ ] (v2) Hand-rolled edges-as-data routing, if a second mode is added
 
@@ -544,7 +571,7 @@ These are decisions, not a backlog. Each names the evidence that would reopen it
 | The Reviewer's contract stays at plan + diff — no repo access | A probe reason showing it needs code it wasn't given. Probe 1 was checked for exactly this and did not show it: the function it named came from the plan's own text |
 | No validator rejecting test files in `target_files` | The first observed run where a Planner targets one. **This has now happened once** (tokenize-rt, arm C, recorded as F10 in `CLAUDE.md`). The decision is still open |
 | A parse failure is fatal rather than a seventh status | A real run that hits it. All 168 logged benchmark calls parsed on the first attempt |
-| Livelock halts rather than replanning | A livelock in a real run. **This has now happened**: tokenize-rt ended in livelock in arms B and C, in both full and diff mode. The decision is still open |
+| Livelock halts rather than replanning | A livelock in a real run. **This has now happened**: tokenize-rt ended in livelock in arms B and C, in both full and diff mode. A re-plan arm (D) was designed and probed first: 0 of 12 re-plans fixed the plan, so it was not built and halting stands. Reopen on a different model or a different refuted-plan task |
 | The evidence-withheld control arm is unspent | A reason to know whether evidence changed the retry, beyond knowing the retry worked |
 
 The hard scope fence is stricter than a wishlist: FastAPI, Streamlit, Docker, a SQLite index,
