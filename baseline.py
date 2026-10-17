@@ -46,17 +46,21 @@ from typing import Any
 
 from cli import DEFAULT_DESCRIPTION, discover_failure, repo_dir_name, resolve_repo
 from harness.agents.implementer import (
+    DIFF_EDIT_RULES,
+    EDIT_FORMATS,
     MAX_TOKENS,
     THINKING_LEVEL,
+    EditsNotApplicable,
     ImplementerResponse,
     render_evidence,
+    request_diff_edits,
 )
 from harness.agents.planner import _is_test_file, render_repo
 from harness.agents.tester import PYTEST_TESTS_FAILED, Tester, tester_failure_from
 from harness.events import EventLog
 from harness.llm import LLMClient, LLMError, LLMTruncatedError
 from harness.loop import MAX_ATTEMPTS, render_diff
-from harness.state import Evidence, Status, TaskState, make_task_id
+from harness.state import Evidence, FileEdit, ReviewerRejection, Status, TaskState, make_task_id
 from harness.workspace import (
     RUNS_ROOT,
     apply_edits,
@@ -84,6 +88,26 @@ forward slashes, as shown. Leave out any file you do not change.
 Copy everything you are not changing exactly as it is.\
 """
 
+# Diff mode: the same first two paragraphs, and the Implementer's own format
+# rules in place of the full-file paragraph, so arms A, B and C are told the same
+# format in the same words. No sentence about test files: that would be a second
+# change riding along with the format (CLAUDE.md, "Diff-mode edits", D13).
+SYSTEM_PROMPT_DIFF = f"""\
+You are fixing a bug in a small Python repository. One or more of its tests are
+failing. Change the code so that the failing tests pass and every other test
+still passes.
+
+You are given the failing pytest output and the repository's source files. Test
+files are listed by path only; the failing assertions and tracebacks are in the
+pytest output.
+
+{DIFF_EDIT_RULES}
+
+Use the repo-relative path with forward slashes, as shown. Inside a block, copy
+every line you are not changing from the search text to the replace text
+exactly as it is.\
+"""
+
 
 def render_user_message(
     *,
@@ -91,6 +115,7 @@ def render_user_message(
     task_description: str,
     failure_input: str,
     evidence: Evidence | None,
+    edit_format: str = "full",
 ) -> str:
     """Task, repository, failure, then evidence.
 
@@ -103,7 +128,7 @@ def render_user_message(
         f"<failing_test_output>\n{failure_input}\n</failing_test_output>",
     ]
     if evidence is not None:
-        sections.append(render_evidence(evidence))
+        sections.append(render_evidence(evidence, edit_format))
     return "\n\n".join(sections)
 
 
@@ -115,8 +140,17 @@ def run_baseline(
     event_log: EventLog,
     approve: Callable[[str], bool],
     runs_root: str | Path = RUNS_ROOT,
+    edit_format: str = "full",
 ) -> TaskState:
-    """Run the baseline to a terminal status and return the final state."""
+    """Run the baseline to a terminal status and return the final state.
+
+    `edit_format="diff"` swaps the full-file call for the Implementer's own
+    `request_diff_edits`: the same resolver, the same one repair call, and the
+    same routing when the blocks still do not apply -- a `ReviewerRejection`,
+    `edit_apply_failed`, one attempt consumed.
+    """
+    if edit_format not in EDIT_FORMATS:
+        raise ValueError(f"unknown edit format {edit_format!r}; expected one of {EDIT_FORMATS}")
 
     def log(event: str, agent: str = "harness", **payload: Any) -> None:
         event_log.append(attempt=state.attempt_count, agent=agent, event=event, payload=payload)
@@ -127,6 +161,8 @@ def run_baseline(
         log("run_finished", status=status, attempt_count=state.attempt_count, reason=reason)
         return state
 
+    # `edit_format` is stamped only when it is not the default, so a full-mode
+    # log keeps the shape every earlier log has, and a missing key reads as full.
     log(
         "run_started",
         arm=AGENT,
@@ -134,6 +170,7 @@ def run_baseline(
         fixture_path=str(fixture_path),
         repo_path=state.repo_path,
         max_attempts=MAX_ATTEMPTS,
+        **({"edit_format": edit_format} if edit_format != "full" else {}),
     )
 
     while True:
@@ -149,35 +186,40 @@ def run_baseline(
         reset_run_dir(state.task_id, fixture_path, runs_root)
         log("baseline_reset", repo_path=state.repo_path)
 
-        user = render_user_message(
-            repo_path=state.repo_path,
-            task_description=state.task_description,
-            failure_input=state.failure_input,
-            evidence=state.evidence,
-        )
-        log(
-            "llm_request",
-            agent=AGENT,
-            system_chars=len(SYSTEM_PROMPT),
-            user_chars=len(user),
-            evidence_kind=state.evidence.kind if state.evidence is not None else None,
-        )
-        try:
-            result = client.complete_structured(
-                system=SYSTEM_PROMPT,
-                user=user,
-                schema=ImplementerResponse,
-                max_tokens=MAX_TOKENS,
-                thinking_level=THINKING_LEVEL,
+        if edit_format == "diff":
+            user = render_user_message(
+                repo_path=state.repo_path,
+                task_description=state.task_description,
+                failure_input=state.failure_input,
+                evidence=state.evidence,
+                edit_format="diff",
             )
-        except LLMTruncatedError as exc:
-            # Same as `Agent.run`: record what the call cost, then let it end the run.
-            if exc.call_payload is not None:
-                log("llm_response", agent=AGENT, **exc.call_payload)
-            raise
-        log("llm_response", agent=AGENT, **result.log_payload())
+            try:
+                edits = request_diff_edits(
+                    client=client,
+                    system=SYSTEM_PROMPT_DIFF,
+                    user=user,
+                    repo_path=state.repo_path,
+                    request_payload={
+                        "system_chars": len(SYSTEM_PROMPT_DIFF),
+                        "evidence_kind": state.evidence.kind if state.evidence is not None else None,
+                    },
+                    log=lambda event, payload: log(event, agent=AGENT, **payload),
+                )
+            except LLMTruncatedError as exc:
+                if exc.call_payload is not None:
+                    log("llm_response", agent=AGENT, **exc.call_payload)
+                raise
+            except EditsNotApplicable as exc:
+                state = _advance(
+                    state,
+                    evidence=ReviewerRejection(reason=exc.reason(), violated_constraints=[]),
+                )
+                log("edit_apply_failed", failures=exc.log_payload())
+                continue
+        else:
+            edits = _request_full_edits(state, client, log)
 
-        edits = result.value.edits
         diff = render_diff(state.repo_path, edits)
         state = _advance(state, edits=edits, diff=diff)
         log("diff_rendered", diff=diff)
@@ -216,6 +258,38 @@ def run_baseline(
         log("test_failed", failed_tests=test_result.failed_tests, exit_code=test_result.exit_code)
 
 
+def _request_full_edits(state: TaskState, client: Any, log: Callable[..., None]) -> list[FileEdit]:
+    """The full-file call, exactly as it was before diff mode: whole files back."""
+    user = render_user_message(
+        repo_path=state.repo_path,
+        task_description=state.task_description,
+        failure_input=state.failure_input,
+        evidence=state.evidence,
+    )
+    log(
+        "llm_request",
+        agent=AGENT,
+        system_chars=len(SYSTEM_PROMPT),
+        user_chars=len(user),
+        evidence_kind=state.evidence.kind if state.evidence is not None else None,
+    )
+    try:
+        result = client.complete_structured(
+            system=SYSTEM_PROMPT,
+            user=user,
+            schema=ImplementerResponse,
+            max_tokens=MAX_TOKENS,
+            thinking_level=THINKING_LEVEL,
+        )
+    except LLMTruncatedError as exc:
+        # Same as `Agent.run`: record what the call cost, then let it end the run.
+        if exc.call_payload is not None:
+            log("llm_response", agent=AGENT, **exc.call_payload)
+        raise
+    log("llm_response", agent=AGENT, **result.log_payload())
+    return result.value.edits
+
+
 def _advance(state: TaskState, **fields: Any) -> TaskState:
     """A new, revalidated state with `fields` replaced -- the loop's own rule."""
     return TaskState.model_validate(state.model_dump() | fields)
@@ -229,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Single-agent baseline for the benchmark.")
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--description", default=DEFAULT_DESCRIPTION)
+    parser.add_argument("--edit-format", choices=EDIT_FORMATS, default="full")
     args = parser.parse_args(argv)
 
     repo_dir = resolve_repo(args.repo)
@@ -256,6 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         client=client,
         event_log=event_log,
         approve=_always_approve,
+        edit_format=args.edit_format,
     )
     print(f"{final.status} after {final.attempt_count} attempt(s). Log: {event_log.path}")
     return 0 if final.status is Status.SUCCEEDED else 1

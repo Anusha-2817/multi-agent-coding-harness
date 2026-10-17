@@ -27,7 +27,7 @@ from typing import Any
 
 from cli import DEFAULT_DESCRIPTION, discover_failure, repo_dir_name, resolve_repo
 from harness.agents.base import Agent
-from harness.agents.implementer import Implementer
+from harness.agents.implementer import EDIT_FORMATS, Implementer
 from harness.agents.planner import Planner
 from harness.agents.reviewer import Reviewer
 from harness.agents.tester import PYTEST_TESTS_FAILED, Tester
@@ -64,15 +64,25 @@ class ArmEventLog(EventLog):
     `run_started` is written inside `run_task`, whose payload is fixed, so this
     is the only way to put the arm there without editing `harness/`. Every other
     event passes through untouched.
+
+    `edit_format` is stamped the same way, and only when it is not `full`: a
+    full-mode log keeps the shape every earlier log has, and a missing key reads
+    as full, so no old log needs migrating.
     """
 
-    def __init__(self, task_id: str, arm: str, log_dir: str | Path = "logs") -> None:
+    def __init__(
+        self, task_id: str, arm: str, log_dir: str | Path = "logs", edit_format: str = "full"
+    ) -> None:
         super().__init__(task_id, log_dir)
         self.arm = arm
+        self.edit_format = edit_format
 
     def append(self, *, attempt: int, agent: str, event: str, payload: dict[str, Any]) -> None:
         if event == "run_started":
-            payload = {"arm": self.arm, **payload}
+            stamp = {"arm": self.arm}
+            if self.edit_format != "full":
+                stamp["edit_format"] = self.edit_format
+            payload = {**stamp, **payload}
         super().append(attempt=attempt, agent=agent, event=event, payload=payload)
 
 
@@ -88,8 +98,13 @@ def run_arm(
     client: Any,
     event_log: EventLog,
     runs_root: str | Path = RUNS_ROOT,
+    edit_format: str = "full",
 ) -> TaskState:
-    """Run one arm to a terminal state. The reviewer is the only arm-dependent line."""
+    """Run one arm to a terminal state. The reviewer is the only arm-dependent line.
+
+    `edit_format` reaches the Implementer and nothing else, and is the same for B
+    and C, so B vs C still varies only the reviewer.
+    """
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}; expected one of {ARMS}")
 
@@ -99,7 +114,7 @@ def run_arm(
         state,
         fixture_path=fixture_path,
         planner=Planner(event_log, client),
-        implementer=Implementer(event_log, client),
+        implementer=Implementer(event_log, client, edit_format),
         reviewer=reviewer,
         tester=Tester(event_log),
         event_log=event_log,
@@ -113,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--arm", choices=ARMS, required=True)
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--description", default=DEFAULT_DESCRIPTION)
+    parser.add_argument("--edit-format", choices=EDIT_FORMATS, default="full")
     args = parser.parse_args(argv)
 
     repo_dir = resolve_repo(args.repo)
@@ -122,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(str(exc)) from exc
 
     task_id = f"arm{args.arm}_{make_task_id(repo_dir_name(repo_dir))}"
-    event_log = ArmEventLog(task_id, args.arm)
+    event_log = ArmEventLog(task_id, args.arm, edit_format=args.edit_format)
 
     discovered = discover_failure(repo_dir, event_log)
     if discovered.exit_code != PYTEST_TESTS_FAILED:
@@ -134,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         task_description=args.description,
         failure_input=discovered.stdout,
     )
-    final = run_arm(args.arm, state, fixture_path=repo_dir, client=client, event_log=event_log)
+    final = run_arm(args.arm, state, fixture_path=repo_dir, client=client, event_log=event_log,
+                    edit_format=args.edit_format)
     print(f"arm {args.arm}: {final.status} after {final.attempt_count} attempt(s). Log: {event_log.path}")
     return 0 if final.status is Status.SUCCEEDED else 1
 

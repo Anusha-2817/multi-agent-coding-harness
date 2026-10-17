@@ -176,3 +176,96 @@ class TestTestFileEdits:
         applied = named(log, "edits_applied")[0]["payload"]
         assert applied["test_paths"] == [test_file]
         assert set(applied["paths"]) == {DISCOUNTS, test_file}
+
+
+# -- diff mode -------------------------------------------------------------------
+
+from fixture_edits import BUG, FIX  # noqa: E402
+
+from baseline import SYSTEM_PROMPT_DIFF  # noqa: E402
+from harness.agents.implementer import DiffImplementerResponse, SearchReplace  # noqa: E402
+from harness.state import ReviewerRejection  # noqa: E402
+
+FIX_BLOCK = [SearchReplace(path=DISCOUNTS, search=BUG, replace=FIX)]
+MISS_BLOCK = [SearchReplace(path=DISCOUNTS, search="if quantity >> tier:", replace=FIX)]
+# Arm A is shown test files by path only, so a block guessing at one's contents
+# cannot match: the blind rewrite full mode allows is not expressible here.
+BLIND_TEST_BLOCK = [SearchReplace(path="tests/test_orders.py", search="def test_guess():", replace="x")]
+
+
+class DiffScriptedClient(ScriptedClient):
+    """`ScriptedClient`, answering with edit blocks instead of whole files."""
+
+    def complete_structured(self, *, system, user, schema, max_tokens, thinking_level=None):
+        self.calls.append({"system": system, "user": user, "schema": schema,
+                           "max_tokens": max_tokens, "thinking_level": thinking_level})
+        response = self.responses[len(self.calls) - 1]
+        if isinstance(response, Exception):
+            raise response
+        return LLMResult(value=DiffImplementerResponse(edits=response), model=DEFAULT_MODEL,
+                         stop_reason="STOP", parse_attempts=1, usage=USAGE)
+
+
+def run_diff(tmp_path, responses):
+    log = EventLog(TASK_ID, log_dir=tmp_path / "logs")
+    runs_root = tmp_path / "runs"
+    state = TaskState(task_id=TASK_ID, repo_path=prepare_run_dir(TASK_ID, FIXTURE, runs_root),
+                      task_description="Fix the failing test(s) in this repository.",
+                      failure_input=FAILURE_INPUT)
+    client = DiffScriptedClient(responses)
+    final = run_baseline(state, fixture_path=FIXTURE, client=client, event_log=log,
+                         approve=StubApprover([True] * len(responses)), runs_root=runs_root,
+                         edit_format="diff")
+    return final, client, log
+
+
+class TestDiffMode:
+    def test_a_block_that_applies_goes_green_in_one_call(self, tmp_path):
+        final, client, log = run_diff(tmp_path, [FIX_BLOCK])
+
+        assert final.status is Status.SUCCEEDED and final.attempt_count == 1
+        assert final.edits == fixing_edits()  # resolved to the same full-file edit
+        call = client.calls[0]
+        assert (call["system"], call["schema"]) == (SYSTEM_PROMPT_DIFF, DiffImplementerResponse)
+        assert (call["max_tokens"], call["thinking_level"]) == (MAX_TOKENS, THINKING_LEVEL)
+        assert named(log, "run_started")[0]["payload"]["edit_format"] == "diff"
+        request = named(log, "llm_request")[0]
+        assert request["agent"] == "baseline" and request["payload"]["edit_format"] == "diff"
+
+    def test_the_repair_call_rescues_a_block_and_costs_no_attempt(self, tmp_path):
+        final, client, log = run_diff(tmp_path, [MISS_BLOCK, FIX_BLOCK])
+
+        assert final.status is Status.SUCCEEDED and final.attempt_count == 1
+        assert len(client.calls) == 2
+        assert [e["payload"].get("repair_of") for e in named(log, "llm_request")] == [None, "edit_apply"]
+        assert named(log, "edit_apply_failed") == []
+
+    def test_a_block_still_failing_after_repair_consumes_the_attempt(self, tmp_path):
+        final, client, log = run_diff(tmp_path, [MISS_BLOCK, MISS_BLOCK, FIX_BLOCK])
+
+        assert final.status is Status.SUCCEEDED and final.attempt_count == 2
+        assert len(client.calls) == 3
+        [failed] = named(log, "edit_apply_failed")
+        assert failed["attempt"] == 1 and failed["agent"] == "harness"
+        assert isinstance(final.evidence, ReviewerRejection)
+        assert "search began: 'if quantity >> tier:'" in client.calls[2]["user"]
+        assert len(named(log, "edits_applied")) == 1
+
+    def test_a_blind_test_file_edit_cannot_apply(self, tmp_path):
+        final, _, log = run_diff(tmp_path, [BLIND_TEST_BLOCK, BLIND_TEST_BLOCK, FIX_BLOCK])
+
+        assert final.status is Status.SUCCEEDED
+        [failed] = named(log, "edit_apply_failed")
+        assert failed["payload"]["failures"][0]["path"] == "tests/test_orders.py"
+        assert all(e["payload"]["test_paths"] == [] for e in named(log, "edits_applied"))
+
+    def test_full_mode_stamps_nothing_new(self, tmp_path):
+        _, _, _, log = run(tmp_path, [fixing_edits()])
+
+        assert "edit_format" not in named(log, "run_started")[0]["payload"]
+        assert "edit_format" not in named(log, "llm_request")[0]["payload"]
+
+    def test_an_unknown_format_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="unknown edit format"):
+            run_baseline(None, fixture_path=FIXTURE, client=None, event_log=None,
+                         approve=None, edit_format="patch")

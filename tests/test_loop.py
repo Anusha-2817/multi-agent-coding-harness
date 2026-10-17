@@ -39,6 +39,8 @@ from fixture_edits import (
     out_of_scope_edits,
 )
 
+from harness.agents.base import Agent
+from harness.agents.implementer import EditFailure, EditsNotApplicable
 from harness.agents.stubs import StubApprover, StubImplementer, StubPlanner, StubReviewer
 from harness.agents.tester import Tester
 from harness.events import EventLog
@@ -919,3 +921,86 @@ class TestTheEventLog:
         assert run.final.status is status
         assert run.names().count("run_finished") == 1
         assert run.events[-1]["payload"]["status"] == status.value
+
+
+# -- diff mode: edit blocks that do not apply ------------------------------------
+
+
+class ScriptedDiffImplementer(Agent):
+    """An Implementer that raises `EditsNotApplicable` where its script says to.
+
+    Test-local rather than a `StubImplementer` change: a stub hands out values,
+    and teaching it to raise would widen every stub for one loop branch. What the
+    loop sees is exactly what a real diff-mode Implementer gives it after a failed
+    repair call -- the exception, and nothing produced.
+    """
+
+    name = "implementer"
+
+    def __init__(self, event_log: EventLog, script) -> None:
+        super().__init__(event_log)
+        self.script = list(script)
+        self.seen: list = []
+
+    def _run(self, *, repo_path, plan, evidence):
+        self.seen.append(evidence)
+        entry = self.script.pop(0)
+        if isinstance(entry, Exception):
+            raise entry
+        return entry
+
+
+def unapplicable() -> EditsNotApplicable:
+    failure = EditFailure(index=1, path=DISCOUNTS, kind="no_match", search="if nope:", match_count=0)
+    return EditsNotApplicable([failure], 1)
+
+
+def run_diff_scenario(tmp_path, script) -> tuple[TaskState, ScriptedDiffImplementer, StubReviewer, list[dict]]:
+    event_log = EventLog(TASK_ID, log_dir=tmp_path / "logs")
+    implementer = ScriptedDiffImplementer(event_log, script)
+    reviewer = StubReviewer(event_log, [APPROVED] * len(script))
+    state = TaskState(task_id=TASK_ID, repo_path=prepare_run_dir(TASK_ID, FIXTURE, tmp_path / "runs"),
+                      task_description="d", failure_input="1 failed, 19 passed")
+    final = run_task(state, fixture_path=FIXTURE, planner=StubPlanner(event_log, [PLAN]),
+                     implementer=implementer, reviewer=reviewer, tester=Tester(event_log),
+                     event_log=event_log, approve=StubApprover([True] * len(script)),
+                     runs_root=tmp_path / "runs")
+    events = [json.loads(line) for line in event_log.path.read_text(encoding="utf-8").splitlines()]
+    return final, implementer, reviewer, events
+
+
+class TestEditsThatDoNotApply:
+    def test_they_route_back_like_a_scope_violation_and_consume_the_attempt(self, tmp_path):
+        final, implementer, reviewer, events = run_diff_scenario(
+            tmp_path, [unapplicable(), fixing_edits()])
+
+        assert final.status is Status.SUCCEEDED
+        assert final.attempt_count == 2
+        assert len(reviewer.seen) == 1  # never called on the attempt that did not apply
+        assert len(final.previous_diffs) == 1  # nothing was rendered for it
+        retry_evidence = implementer.seen[1]
+        assert isinstance(retry_evidence, ReviewerRejection)
+        assert retry_evidence.reason == unapplicable().reason()
+        assert retry_evidence.violated_constraints == []
+
+        first = [e["event"] for e in events if e["attempt"] == 1 and e["agent"] == "harness"]
+        assert first == ["baseline_reset", "edit_apply_failed"]
+        failed = next(e for e in events if e["event"] == "edit_apply_failed")
+        assert failed["payload"]["failures"][0]["kind"] == "no_match"
+
+    def test_the_reviewer_only_ever_receives_plan_and_diff(self, tmp_path):
+        _, _, reviewer, _ = run_diff_scenario(tmp_path, [unapplicable(), fixing_edits()])
+
+        assert [sorted(call) for call in reviewer.seen] == [["diff", "plan"]]
+
+    def test_five_in_a_row_hit_the_cap_with_a_full_ledger_and_no_livelock(self, tmp_path):
+        from cli import attempt_ledger
+
+        final, _, reviewer, events = run_diff_scenario(tmp_path, [unapplicable() for _ in range(MAX_ATTEMPTS)])
+
+        assert final.status is Status.ESCALATED_RETRY_LIMIT
+        assert final.attempt_count == MAX_ATTEMPTS
+        assert reviewer.seen == [] and final.previous_diffs == []
+        ledger = attempt_ledger(events)
+        assert [row[:2] for row in ledger] == [(n, "edit_apply_failed") for n in range(1, MAX_ATTEMPTS + 1)]
+        assert ledger[0][2] == f"{DISCOUNTS}: no_match"

@@ -175,3 +175,65 @@ class TestTheVerdictIsTheOnlyDifference:
     def test_an_unknown_arm_is_refused(self, tmp_path):
         with pytest.raises(ValueError, match="unknown arm"):
             run(tmp_path, "A", SchemaClient(edits=[]))
+
+
+# -- diff mode -------------------------------------------------------------------
+
+from fixture_edits import BUG, FIX  # noqa: E402
+
+from harness.agents.implementer import DiffImplementerResponse, SearchReplace  # noqa: E402
+
+FIX_BLOCK = [SearchReplace(path=DISCOUNTS, search=BUG, replace=FIX)]
+
+
+class DiffSchemaClient(SchemaClient):
+    """`SchemaClient`, with the Implementer answering in edit blocks."""
+
+    def __init__(self, *, blocks, verdicts=()):
+        super().__init__(edits=[], verdicts=verdicts)
+        self.scripts[DiffImplementerResponse] = [DiffImplementerResponse(edits=b) for b in blocks]
+
+
+def run_diff(tmp_path, arm, client):
+    log = ArmEventLog(TASK_ID, arm, log_dir=tmp_path / "logs", edit_format="diff")
+    state = TaskState(
+        task_id=TASK_ID,
+        repo_path=prepare_run_dir(TASK_ID, FIXTURE, tmp_path / "runs"),
+        task_description="Fix the failing test(s) in this repository.",
+        failure_input="FAILED tests/test_orders.py::test_an_order_at_the_bulk_threshold_is_discounted",
+    )
+    final = run_arm(arm, state, fixture_path=FIXTURE, client=client, event_log=log,
+                    runs_root=tmp_path / "runs", edit_format="diff")
+    events = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
+    return final, events
+
+
+class TestDiffMode:
+    def test_b_and_c_pass_the_format_through_with_identical_prompts(self, tmp_path):
+        b_client = DiffSchemaClient(blocks=[FIX_BLOCK])
+        c_client = DiffSchemaClient(blocks=[FIX_BLOCK], verdicts=[APPROVED])
+        b_final, b_events = run_diff(tmp_path / "b", "B", b_client)
+        c_final, c_events = run_diff(tmp_path / "c", "C", c_client)
+
+        assert b_final.status is c_final.status is Status.SUCCEEDED
+        assert b_client.schemas() == [Plan, DiffImplementerResponse]
+        assert c_client.schemas() == [Plan, DiffImplementerResponse, ReviewVerdict]
+        for schema in (Plan, DiffImplementerResponse):
+            assert b_client.calls_for(schema) == c_client.calls_for(schema)
+        for events in (b_events, c_events):
+            assert named(events, "run_started")[0]["payload"]["edit_format"] == "diff"
+
+    def test_the_reviewer_sees_the_rendered_diff_not_the_blocks(self, tmp_path):
+        client = DiffSchemaClient(blocks=[FIX_BLOCK], verdicts=[APPROVED])
+        final, _ = run_diff(tmp_path, "C", client)
+
+        [review] = client.calls_for(ReviewVerdict)
+        assert final.diff in review["user"]
+        assert f"--- a/{DISCOUNTS}" in review["user"]
+        assert f"-        {BUG}" in review["user"] and f"+        {FIX}" in review["user"]
+
+    def test_full_mode_logs_carry_no_format_stamp(self, both_green):
+        (_, b_events), _, (_, c_events), _ = both_green
+
+        for events in (b_events, c_events):
+            assert "edit_format" not in named(events, "run_started")[0]["payload"]

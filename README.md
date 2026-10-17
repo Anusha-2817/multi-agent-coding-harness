@@ -5,9 +5,10 @@ Implementer, Reviewer, Tester — collaborate through typed state handoffs to re
 tasks, with built-in failure recovery and a human-approval gate before any irreversible action.
 
 **Status:** the loop is built and measured. Four real LLM-backed agents, three fixture repos,
-563 harness tests that make zero API calls, and saved run transcripts. What follows reports what
-it does and what measuring it produced — including two findings that cost the fixtures their
-traps.
+628 harness tests that make zero API calls (on branch `diff-edits`), saved run transcripts, and a
+first three-arm benchmark on six real upstream bugs (tag `v0.1.0`; see "Benchmark results").
+What follows reports what it does and what measuring it produced — including two findings that
+cost the fixtures their traps.
 
 ---
 
@@ -101,7 +102,7 @@ Four role-pure agents, each with exactly one job:
 | Agent | Job | Never does |
 |---|---|---|
 | Planner | Reads the failure and the repo, produces a plan (summary, steps, target files, constraints) | Write code |
-| Implementer | Reads the plan and the target files, produces whole-file edits | Judge its own correctness |
+| Implementer | Reads the plan and the target files, produces whole-file edits (or search/replace blocks the harness resolves into whole files, with `--edit-format diff`) | Judge its own correctness |
 | Reviewer | Checks the diff against the plan — attribution, correspondence, constraints | See test results |
 | Tester | Runs the real suite, reports structured pass/fail evidence | Decide what the fix should be |
 
@@ -245,8 +246,8 @@ price of not stubbing the Tester.
 | Language | Python 3.14, no agent framework |
 | State | Pydantic v2 (`TaskState`) |
 | LLM transport | Official `google-genai` SDK |
-| Model | `llm.DEFAULT_MODEL` — `gemini-3.6-flash` today (Google routes `gemini-3.5-flash` requests to it), structured JSON schema output, dynamic thinking |
-| Edits | Whole-file `new_content` per `FileEdit` — not patches |
+| Model | `llm.DEFAULT_MODEL` — `gemini-3.6-flash` on the Google backend (Google routes `gemini-3.5-flash` requests to it); the benchmark uses `google/gemini-3.8-flash` through the OpenRouter backend. Structured JSON schema output |
+| Edits | Whole-file `new_content` per `FileEdit` — not patches. On branch `diff-edits`, the benchmark scripts' `--edit-format diff` has the model send search/replace blocks instead, which the harness resolves into the same whole-file edits. The default stays `full` |
 | Diff rendering | `difflib.unified_diff` over edits + baseline, for review only |
 | Test execution | `subprocess` running `pytest`, 120s timeout, via `sys.executable -m pytest` |
 | Event log | Append-only `.jsonl`, one file per run |
@@ -255,7 +256,9 @@ price of not stubbing the Tester.
 
 Edits carry whole files rather than patches because a model emitting a valid unified diff with
 correct line offsets is a much harder ask than emitting a file; the diff is *rendered* by the
-harness for review, never parsed from the model.
+harness for review, never parsed from the model. Diff mode keeps that rule: the model sends
+exact search text and replacement text, never hunk headers or line numbers. A block that
+doesn't match exactly once is not applied.
 
 The Tester runs the **whole** suite, not just the target test — "without breaking anything else"
 is only verifiable against all of it. A hung pytest returns `exit_code=-1`, deliberately outside
@@ -271,7 +274,7 @@ Everything below is from saved transcripts in `transcripts/`, not from memory.
 
 ### The harness suite
 
-**563 tests, all passing, ~500s, and zero API calls.** No test needs an API key; the SDK is
+**628 tests on branch `diff-edits`, all passing, ~850s, and zero API calls.** No test needs an API key; the SDK is
 faked wherever it is reached for. Two `pytest.ini` files keep the harness suite and the fixture
 suites from ever collecting together — a fixture's deliberate bug is *data*, and reporting it as
 a harness failure would make the harness suite permanently red. The fixture-local ini is the
@@ -394,19 +397,118 @@ retry path has run against a real model. What no one has yet checked is, attempt
 the rejection text appears in the next Implementer prompt. Before the benchmark, every fixture
 built to force a retry was rescued by the Planner instead.
 
-## Benchmark (in progress)
+## Benchmark results
 
-Three arms, run on the same tasks with the same model, token limits, attempt cap and Tester:
+Three arms, the same model, token limits, attempt cap (5) and Tester:
+**A** is a single loop with no Planner and no Reviewer, **B** is the harness without the Reviewer, and **C** is the full harness.
+Six real upstream bugs (the eval split). The upstream tests are hidden from scoring and restored over the run before it is scored, so editing a test cannot change a score. Model: `google/gemini-3.8-flash` via OpenRouter.
 
-- **A** — one agent, no Planner and no Reviewer: one prompt with the failing output and the repo.
-- **B** — the harness without the Reviewer: Planner, Implementer and Tester, same loop as C.
-- **C** — the full harness: Planner, Implementer, Reviewer and Tester.
+**Every cell is one run (repeat 0) unless stated.** Each table uses one model. Earlier
+`gemini-3.6-flash` results are in separate files and are not comparable with these.
+
+**Versions.** Tag **`v0.1.0`** is the first benchmark, with full-file edits only (Table 1). The
+diff-edits work (Tables 2 and 3) is on branch **`diff-edits`**, where `--edit-format` defaults
+to `full`.
+
+### Table 1 — full-file edits
+
+Model calls per run; ✅ solved, ❌ not solved.
+
+| Task | A | B | C |
+|---|---|---|---|
+| humps | ✅ 1 | ✅ 2 | ✅ 7 |
+| mccabe | ✅ 1 | ✅ 2 | ✅ 5 |
+| cfgv | ✅ 1 | ✅ 2 | ✅ 5 |
+| addict | ✅ 1 | ✅ 2 | ✅ 3 |
+| shortuuid | ✅ 1 | ✅ 2 | ✅ 5 |
+| tokenize-rt | ❌ 5 | ❌ 5 | ❌ 11 |
+
+tokenize-rt was run 3 times per arm, and 0 of the 9 runs solved it. Its row shows repeat 0.
+
+### Table 2 — diff edits
+
+`--edit-format diff` (search/replace blocks), repeat 0, same model. Model calls per run. Every
+number in this table is a diff-mode run; the full-file numbers for the same tasks are in Table 1.
+mccabe and addict were run in arm C only; "—" means not run in diff mode.
+
+| Task | A | B | C |
+|---|---|---|---|
+| humps | ✅ 3 | ✅ 2 | ✅ 3 |
+| cfgv | ✅ 1 | ✅ 2 | ✅ 3 |
+| shortuuid | ✅ 1 | ✅ 2 | ✅ 3 |
+| tokenize-rt | ❌ 5 | ❌ 3 | ❌ 8 |
+| mccabe | — not run in diff mode | — not run in diff mode | ✅ 3 |
+| addict | — not run in diff mode | — not run in diff mode | ✅ 3 |
+
+### Table 3 — total output tokens per run, full → diff
+
+| Task | A | B | C |
+|---|---|---|---|
+| humps | 2022 → 514 (−75%) | 2285 → 473 (−79%) | 6679 → 551 (−92%) |
+| cfgv | 3867 → 70 (−98%) | 4076 → 322 (−92%) | 8176 → 433 (−95%) |
+| shortuuid | 1726 → 134 (−92%) | 1923 → 338 (−82%) | 3949 → 461 (−88%) |
+| tokenize-rt | 10422 → 1601 (−85%) | 8247 → 1039 (−87%) | 10558 → 1998 (−81%) |
+
+Median change across the 12 cells: about −88%. Edit-apply failures: 0 of 12 runs; repair
+calls: 0.
+
+### What it shows
+
+- **Solve rate.** A, B and C solved the same 5 of 6 tasks, and none solved tokenize-rt. On
+  these tasks the full harness added calls and no solves.
+- **Patch size.** On addict, humps and shortuuid, A's patch was larger than the upstream fix
+  (8 vs 2, 11 vs 2 and 7 vs 4 source lines). B and C stayed within 2 lines of upstream. This is an
+  observation from one run each.
+- **Diff edits** cut output tokens by 75 to 98% in every cell. C solved humps, cfgv and
+  shortuuid on attempt 1, where full mode took 3, 2 and 2 attempts. That is consistent with the
+  Reviewer's earlier rejections coming from collateral damage in whole-file rewrites.
+- **Diff mode did not fix tokenize-rt.** All arms still fail it, and in diff mode B and C both
+  ended in livelock.
+
+### Limitations
+
+- One run per cell, except tokenize-rt in full mode (3 per arm).
+- One model.
+- The easy tasks mostly saturate: every arm solves them, so solve rate cannot separate the arms.
+- The diff-edits gate was **provisional**: 4 tasks, repeat 0. `--edit-format` still defaults to
+  `full`. The full-split gate has not been run.
+- The earlier `gemini-3.6-flash` results live in separate files and are not comparable.
+- Cost (`cost_usd`) is not reported yet.
+
+### Arm D (one re-plan): designed, probe-gated, gate failed, not built
+
+**Diagnosis, from the logs alone.** All 8 tokenize-rt B and C runs failed for the same reason:
+- The Planner picked the right file, `tokenize_rt.py`, every time.
+- Every plan prescribed `tok_text = line[scol:ecol]` for f-string middles. Under Python 3.12+ tokenize, `ecol` is counted on the *unescaped* text, so that slice equals `tok_text` and the fix changes nothing.
+- The Implementer followed the plan, the Tester showed the same failing assertion every attempt, and in arm C the Reviewer approved the plan-faithful diffs.
+
+The fault was in the plan, not in the implementation.
+
+**The idea.** Arm D = arm C plus at most one re-plan, triggered by a livelock or by two identical test failures. The re-planner is shown the refuted plan, the diff that implemented it, and the failure it produced.
+
+**The cheap gate first.** Before building anything, `probe_replanner.py` asked the re-plan prompt 12 times (4 recorded C runs × 3 samples), at their replayed trigger points.
+
+| PASS | MIXED | FAIL | TRUNCATED | Gate to build |
+|---|---|---|---|---|
+| 0 | 2 | 6 | 4 | ≥ 6 of 12 |
+
+**The heuristic grader and a hand read agree that this is far below the gate.** In the hand read:
+- At most 1 of 12 plans is plausibly correct, and it is unverified.
+- 2 plans would edit the test file.
+- 1 is a no-op.
+- 4 used the whole 24,000-token budget without producing a plan.
+
+The probe cost about $0.61. **Arm D was not built.** On this task and model, the missing piece looks like model knowledge, not loop structure.
+
+This is one task, one model and one prompt. It does not show that re-planning is useless in general. The design and the full numbers are in `CLAUDE.md`, under "Arm D: one re-plan — not pursued".
+
+### How it is run
 
 Four scripts at the repo root, none of them part of the shipped CLI:
 `baseline.py` (arm A), `harness_arms.py` (arms B and C), `scorer.py` (scores one finished
 run against the hidden upstream test) and `driver.py` (runs the arms over the task set,
-resumable). Nine tasks are defined: small real upstream bug fixes, three for development and six
-for evaluation. Live runs are **partial** so far, limited by free-tier API quotas.
+resumable; `--edit-format full|diff`, default `full`, one format per results file). Nine tasks
+are defined: small real upstream bug fixes, three for development and six for evaluation.
 
 The arms run model-written code against each task's tests on your machine. The same safety note
 applies: trusted repos only, no sandbox yet.
@@ -456,8 +558,10 @@ unfinished work.
 - [x] Validate across 2–3 fixture repos with different injected bugs
 - [x] Saved run transcripts
 - [x] Livelock detection: a byte-identical diff halts the run and reports the plan as likely fault
-- [ ] A fail-then-recover run against a real model — the one path still unexercised
-- [ ] (v2) Route a livelock back to the Planner rather than halting
+- [x] A fail-then-recover run against a real model (schema, recorded as F8 in `CLAUDE.md`; arm C on humps in the benchmark)
+- [x] Three-arm benchmark on six real upstream bugs (tag `v0.1.0`)
+- [x] Diff-based edits behind `--edit-format` (branch `diff-edits`). The provisional gate passed; the full-split gate has not been run, so the default stays `full`
+- [ ] (v2) Route a livelock back to the Planner rather than halting. Probed as arm D on tokenize-rt: the gate failed at 0/12 and it was not built (see "Arm D" under Benchmark results)
 - [ ] (v2) Second task mode: feature implementation from a structured requirement
 - [ ] (v2) Hand-rolled edges-as-data routing, if a second mode is added
 
@@ -468,9 +572,9 @@ These are decisions, not a backlog. Each names the evidence that would reopen it
 | Decision | Trigger to revisit |
 |---|---|
 | The Reviewer's contract stays at plan + diff — no repo access | A probe reason showing it needs code it wasn't given. Probe 1 was checked for exactly this and did not show it: the function it named came from the plan's own text |
-| No validator rejecting test files in `target_files` | The first observed run where a Planner targets one. Not built on unease |
-| A parse failure is fatal rather than a seventh status | A real run that hits it. Every call so far has parsed on the first attempt |
-| Livelock halts rather than replanning | A livelock in a real run. Real models rarely emit byte-identical diffs, so the check is right for the condition it names but rarely fires |
+| No validator rejecting test files in `target_files` | The first observed run where a Planner targets one. **This has now happened once** (tokenize-rt, arm C, recorded as F10 in `CLAUDE.md`). The decision is still open |
+| A parse failure is fatal rather than a seventh status | A real run that hits it. All 168 logged benchmark calls parsed on the first attempt |
+| Livelock halts rather than replanning | A livelock in a real run. **This has now happened**: tokenize-rt ended in livelock in arms B and C, in both full and diff mode. A re-plan arm (D) was designed and probed first: 0 of 12 re-plans fixed the plan, so it was not built and halting stands. Reopen on a different model or a different refuted-plan task |
 | The evidence-withheld control arm is unspent | A reason to know whether evidence changed the retry, beyond knowing the retry worked |
 
 The hard scope fence is stricter than a wishlist: FastAPI, Streamlit, Docker, a SQLite index,

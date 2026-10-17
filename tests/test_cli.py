@@ -559,6 +559,12 @@ class TestTheAttemptLedger:
 
         assert attempt_ledger(events) == [(1, "review_rejected", "line one")]
 
+    def test_an_edit_that_did_not_apply_names_its_file_and_kind(self):
+        failures = [{"path": "pkg/mod.py", "kind": "no_match"}, {"path": "pkg/b.py", "kind": "ambiguous"}]
+        events = [{"attempt": 1, "event": "edit_apply_failed", "payload": {"failures": failures}}]
+
+        assert attempt_ledger(events) == [(1, "edit_apply_failed", "pkg/mod.py: no_match (+1 more)")]
+
 
 class TestTheEscalationOutputAgainstRealTerminalStates:
     """Livelock and broken-suite, rendered from states the loop actually produced.

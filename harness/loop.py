@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.agents.base import Agent
+from harness.agents.implementer import EditsNotApplicable
 from harness.agents.tester import tester_failure_from
 from harness.events import EventLog
 from harness.state import FileEdit, Plan, ReviewerRejection, Status, TaskState
@@ -178,7 +179,20 @@ def run_task(
         _log(event_log, state, "baseline_reset", repo_path=state.repo_path)
 
         # -- implement ------------------------------------------------------
-        state = implementer.run(state)
+        # Diff mode only: edit blocks that still would not apply after the
+        # Implementer's one repair call. Routed like a scope violation -- a
+        # mechanical catch, a ReviewerRejection, one attempt consumed -- and for
+        # the same reason: the corrective action is "produce a different change".
+        # Nothing was rendered, so the Reviewer is never called on it.
+        try:
+            state = implementer.run(state)
+        except EditsNotApplicable as exc:
+            state = _advance(
+                state,
+                evidence=ReviewerRejection(reason=exc.reason(), violated_constraints=[]),
+            )
+            _log(event_log, state, "edit_apply_failed", failures=exc.log_payload())
+            continue
         plan: Plan = state.plan  # non-None: the Implementer's contract asserted it
         edits: list[FileEdit] = state.edits  # non-None: producing None is a violation
 
